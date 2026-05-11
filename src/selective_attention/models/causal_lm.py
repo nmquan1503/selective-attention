@@ -31,7 +31,6 @@ class CausalLM(nn.Module):
         self.embedding = nn.Embedding(cfg.vocab_size, cfg.model_dim)
         self.layers = nn.ModuleList([
             Block(
-                layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
                 ssm_state_dim=cfg.ssm_state_dim,

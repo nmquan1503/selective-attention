@@ -10,7 +10,6 @@ from ..inference import SSMCache
 class SSM(nn.Module):
     def __init__(
         self,
-        layer_idx: int,
         model_dim: int = 512,
         state_dim: int = 128,
         conv_kernel_size: int = 4,
@@ -26,7 +25,6 @@ class SSM(nn.Module):
         device="cuda"
     ):
         super().__init__()
-        self.layer_idx = layer_idx
 
         self.model_dim = model_dim
         self.state_dim = state_dim
