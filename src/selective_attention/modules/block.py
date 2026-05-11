@@ -66,13 +66,28 @@ class Block(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
-        hidden_states, last_ssm_hiddens = self.ssm(hidden_states, lengths, ssm_hiddens, conv_context, cache.ssm_cache)
+        hidden_states, last_ssm_hiddens = self.ssm(
+            hidden_states, 
+            lengths, 
+            ssm_hiddens, 
+            conv_context, 
+            cache.ssm_cache if cache is not None else None
+        )
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv(hidden_states, lengths, cache.mlconv_cache).squeeze(-1))
-        hidden_states = self.mha(hidden_states, gate, lengths, cache.attn_cache)
+        gate = torch.sigmoid(self.gate_conv(
+            hidden_states, 
+            lengths, 
+            cache.mlconv_cache if cache is not None else None
+        ).squeeze(-1))
+        hidden_states = self.mha(
+            hidden_states, 
+            gate, 
+            lengths, 
+            cache.attn_cache if cache is not None else None
+        )
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
