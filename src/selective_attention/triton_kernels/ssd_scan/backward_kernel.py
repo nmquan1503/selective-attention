@@ -1,8 +1,8 @@
 import triton
 import triton.language as tl
 
-from selective_attention.triton_kernels.hooks import reset_buffers
-from selective_attention.triton_kernels.softplus import softplus
+from ..hooks import reset_buffers
+from ..softplus import softplus
 
 
 @triton.autotune(

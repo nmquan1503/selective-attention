@@ -3,7 +3,7 @@ import math
 import triton
 from typing import Tuple
 
-from selective_attention.triton_kernels.ssd_scan.forward_kernel import (
+from .forward_kernel import (
     chunk_cumsum_forward_kernel,
     chunk_state_forward_kernel,
     state_passing_forward_kernel,

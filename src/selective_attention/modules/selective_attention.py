@@ -1,10 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
-from selective_attention.modeling.inference_state import InferenceState
-from selective_attention.modeling.generation_config import GenerationConfig
+from ..inference import SelectiveAttnCache, InferenceState
+from selective_attention.inference.generation_config import GenerationConfig
 
 def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
@@ -40,14 +39,13 @@ def build_rope_cache(seq_len_or_positions, dim, device, mode="seq"):
     sin = torch.sin(angles).repeat_interleave(2, dim=-1)
     return cos, sin
 
-
 def apply_rotary(q, k, cos, sin, mode="seq"):
     if mode == "seq":
         cos = cos[None, None, :, :]
         sin = sin[None, None, :, :]
     elif mode == "pos":
-        cos = cos[:, None, None, :]
-        sin = sin[:, None, None, :]
+        cos = cos[:, None, :]
+        sin = sin[:, None, :]
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 
@@ -86,50 +84,9 @@ def build_attn_matrix(attn_matrix, log_gate):
     attn_matrix = attn_matrix.masked_fill(future_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
     return attn_matrix
 
-def right_align(
-    x: torch.Tensor,
-    valid_mask: torch.Tensor,
-    buffer_size: int
-):
-    """
-    Args:
-        x: (batch_size, num_heads, seq_len, head_dim)
-        valid_mask: (batch_size, seq_len)
-    
-    Returns:
-        x: (batch_size, num_heads, compressed_len + buffer_size, head_dim)
-    """
-    batch_size, num_heads, seq_len, head_dim = x.shape
-    device = x.device
-
-    num_valid = valid_mask.sum(dim=1)
-    max_valid = num_valid.max().item()
-    rank = valid_mask.cumsum(dim=1) - 1
-    shift = max_valid - num_valid
-    out = torch.empty(
-        batch_size, num_heads, max_valid + buffer_size, head_dim,
-        device=device, dtype=torch.float32
-    )
-    src_valid = x.permute(0, 2, 1, 3)[valid_mask]
-    batch_idx = torch.arange(batch_size, device=device)
-    batch_idx = batch_idx.repeat_interleave(num_valid)
-    dst_valid = rank[valid_mask] + shift.repeat_interleave(num_valid)
-    out[batch_idx, :, dst_valid, :] = src_valid
-    valid_mask = (
-        torch.arange(max_valid + buffer_size, device=device)
-        .unsqueeze(0) 
-        >= shift.unsqueeze(1)
-    ) & (
-        torch.arange(max_valid + buffer_size, device=device)
-        .unsqueeze(0)
-        < (shift + num_valid).unsqueeze(1)
-    )
-    return out, valid_mask
-
 class SelectiveMHA(nn.Module):
-    def __init__(self, layer_idx, dim, head_dim):
+    def __init__(self, dim, head_dim):
         super().__init__()
-        self.layer_idx = layer_idx
 
         assert dim % head_dim == 0
         self.dim = dim
@@ -147,7 +104,7 @@ class SelectiveMHA(nn.Module):
         hidden_states: torch.Tensor, 
         gate: torch.Tensor,
         lengths: torch.Tensor | None = None, 
-        state: InferenceState | None = None
+        cache: SelectiveAttnCache | None = None
     ):
         """
         Args:
@@ -159,12 +116,8 @@ class SelectiveMHA(nn.Module):
             hidden_states: (batch_size, seq_len, dim)
         """
         batch_size, seq_len, _ = hidden_states.shape
-        mlconv_radius = gate.shape[1] - 1
-        device = hidden_states.device
-        is_infer = state is not None
-        if is_infer:
-            layer_state = state.layers[self.layer_idx]
-
+        is_infer = cache is not None
+ 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
@@ -188,21 +141,7 @@ class SelectiveMHA(nn.Module):
         hidden_states = self.out_proj(out)
         
         if is_infer:
-            layer_state.k_rot = k_rot
-            layer_state.v = v
-            layer_state.lengths = lengths
-            
-            pos = torch.arange(seq_len, device=device).unsqueeze(0)
-            level_idx = torch.clamp(
-                pos - (lengths.unsqueeze(1) - 1 - mlconv_radius),
-                min=0,
-                max=mlconv_radius
-            )
-            layer_state.log_gate = log_gate[
-                torch.arange(batch_size, device=device).unsqueeze(1),
-                level_idx,
-                pos
-            ]
+            cache.build(k_rot, v, log_gate, lengths)
         
         return hidden_states
 
@@ -210,8 +149,9 @@ class SelectiveMHA(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         gate: torch.Tensor, 
-        state: InferenceState, 
-        gen_cfg: GenerationConfig
+        cache: SelectiveAttnCache, 
+        state: InferenceState,
+        gen_cfg: GenerationConfig,
     ):
         """
         Args:
@@ -225,72 +165,36 @@ class SelectiveMHA(nn.Module):
         batch_size, _ = hidden_states.shape
         mlconv_radius = gate.shape[1] - 1
         device = hidden_states.device
-        layer_state = state.layers[self.layer_idx]
 
         if state.step % gen_cfg.cache_update_interval == 0:
-            if state.step == 0:
-                compressed_len = layer_state.v.shape[2]
-                pos = torch.arange(compressed_len, device=device).unsqueeze(0)
-                valid_mask = pos < layer_state.lengths.unsqueeze(1)
-                gate_mask = layer_state.log_gate >= math.log(gen_cfg.attn_gate_threshold)
-                tail_start = layer_state.lengths - mlconv_radius
-                tail_mask = pos >= tail_start.unsqueeze(1)
-                layer_state.valid_mask = valid_mask & (gate_mask | tail_mask)
-            layer_state.log_gate, _ = right_align(
-                layer_state.log_gate.unsqueeze(1).unsqueeze(-1),
-                layer_state.valid_mask,
-                buffer_size=gen_cfg.cache_update_interval
-            )
-            layer_state.log_gate = layer_state.log_gate.squeeze(-1).squeeze(1)
-            layer_state.k_rot, _ = right_align(
-                layer_state.k_rot,
-                layer_state.valid_mask,
-                buffer_size=gen_cfg.cache_update_interval
-            )
-            layer_state.v, layer_state.valid_mask = right_align(
-                layer_state.v,
-                layer_state.valid_mask,
-                buffer_size=gen_cfg.cache_update_interval
-            )
-            layer_state.write_idx = layer_state.v.shape[2] - gen_cfg.cache_update_interval
-
+            cache.reset(mlconv_radius, gen_cfg.attn_gate_threshold, gen_cfg.cache_update_interval)
+        
         log_gate = torch.log(gate)
-
-        write_idx = layer_state.write_idx
-        remove_mask = gate[:, 0] < gen_cfg.attn_gate_threshold
-        layer_state.valid_mask[remove_mask, write_idx-mlconv_radius] = False
-        layer_state.valid_mask[:, write_idx] = True
-
-        layer_state.log_gate[:, write_idx-mlconv_radius : write_idx+1] = log_gate
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
 
-        q = q.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
+        q = q.view(batch_size, self.num_heads, self.head_dim)
+        k = k.view(batch_size, self.num_heads, self.head_dim)
+        v = v.view(batch_size, self.num_heads, self.head_dim)
 
-        cos, sin = build_rope_cache(layer_state.lengths, self.head_dim, device, mode='pos')
+        cos, sin = build_rope_cache(cache.lengths, self.head_dim, device, mode='pos')
         q_rot, k_rot = apply_rotary(q, k, cos, sin, mode='pos')
 
-        layer_state.k_rot[:, :, write_idx:write_idx+1, :] = k_rot
-        layer_state.v[:, :, write_idx:write_idx+1, :] = v
+        cache.update(k_rot, v, log_gate, gen_cfg.attn_gate_threshold)
 
-        layer_state.lengths += 1
-        layer_state.write_idx += 1
- 
         scale = self.head_dim ** 0.5
-        attn_matrix = (q_rot @ layer_state.k_rot[:, :, :write_idx+1, :].transpose(-2, -1)) / scale
-        attn_matrix = attn_matrix + layer_state.log_gate[:, None, None, :write_idx+1]
+        attn_matrix = (q_rot.unsqueeze(2) @ cache.k_rot[:, :, :cache.write_idx, :].transpose(-2, -1)) / scale
+        attn_matrix = attn_matrix + cache.log_gate[:, None, None, :cache.write_idx]
 
         attn_matrix = attn_matrix.masked_fill(
-            layer_state.valid_mask[:, None, None, :write_idx+1] == 0,
+            cache.valid_mask[:, None, None, :cache.write_idx] == 0,
             float("-inf")
         )
 
         attn_matrix = F.softmax(attn_matrix, dim=-1)
-        out = attn_matrix @ layer_state.v[:, :, :write_idx+1, :]
+        out = attn_matrix @ cache.v[:, :, :cache.write_idx, :]
         out = out.transpose(1, 2).contiguous().view(batch_size, self.dim)
 
         return self.out_proj(out)

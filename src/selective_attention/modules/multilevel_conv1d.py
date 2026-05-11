@@ -2,12 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from selective_attention.modeling.inference_state import InferenceState
+from ..inference import MultiLevelConv1DCache
 
 class MultiLevelConv1D(nn.Module):
-    def __init__(self, layer_idx, in_channels, out_channels, radius):
+    def __init__(self, in_channels, out_channels, radius):
         super().__init__()
-        self.layer_idx = layer_idx
         
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -28,7 +27,7 @@ class MultiLevelConv1D(nn.Module):
         self, 
         x: torch.Tensor,
         lengths: torch.Tensor | None = None,
-        state: InferenceState | None = None
+        cache: MultiLevelConv1DCache | None = None
     ):
         """
         Args:
@@ -40,18 +39,12 @@ class MultiLevelConv1D(nn.Module):
         """
         batch_size, seq_len, _ = x.shape
         device = x.device
-        is_infer = state is not None
-        if is_infer:
-            layer_state = state.layers[self.layer_idx]
+        is_infer = cache is not None
 
         x = x.transpose(1, 2)
+        
         if is_infer:
-            idx = lengths[:, None] - (self.radius + 1) + torch.arange(self.radius + 1, device=device)
-            layer_state.mlconv_in_ctx = torch.gather(
-                x,
-                2,
-                idx.clamp(min=0)[:, None].expand(-1, self.in_channels, -1)
-            ) * (idx >= 0)[:, None]
+            cache.build_in_ctx(x, lengths, self.radius)
 
         base = self.causal_conv1d(x).transpose(1, 2)
         base = base[:, :seq_len]
@@ -71,18 +64,11 @@ class MultiLevelConv1D(nn.Module):
         out = torch.stack(outs, dim=1)
 
         if is_infer:
-            level_idx = torch.arange(self.radius + 1, device=device)
-            batch_idx = torch.arange(batch_size, device=device)[:, None]
-            pos = lengths[:, None] - (self.radius + 1) + level_idx
-            valid = pos >= 0
-            pos = pos.clamp(min=0)
-            layer_state.mlconv_out_ctx = (
-                out[batch_idx, level_idx[None, :], pos] * valid.unsqueeze(-1)
-            )
+            cache.build_out_ctx(out, lengths)
         
         return out
 
-    def step(self, x: torch.Tensor, state: InferenceState):
+    def step(self, x: torch.Tensor, cache: MultiLevelConv1DCache):
         """
         Args:
             x: (batch_size, in_channels)
@@ -90,27 +76,17 @@ class MultiLevelConv1D(nn.Module):
         Returns:
             out: (batch_size, radius + 1, out_channels)
         """
-        layer_state = state.layers[self.layer_idx]
 
-        ctx_x = layer_state.mlconv_in_ctx
-        ctx_x = torch.roll(ctx_x, shifts=-1, dims=2)
-        ctx_x[:, :, -1] = x
-        layer_state.mlconv_in_ctx = ctx_x
+        cache.update_in_ctx(x)
 
         base = F.conv1d(
-            ctx_x,
+            cache.in_ctx,
             self.causal_conv1d.weight,
             self.causal_conv1d.bias
         ).squeeze(-1)
 
-        out_ctx = layer_state.mlconv_out_ctx
+        cache.update_out_ctx(
+            [linear(x) for linear in reversed(self.right_linears)] + [base]
+        )
 
-        for i, linear in enumerate(self.right_linears):
-            out_ctx[:, -1-i, :] = out_ctx[:, -1-i, :] + linear(x)
-
-        out_ctx = torch.roll(out_ctx, shifts=-1, dims=1)
-        out_ctx[:, -1, :] = base
-
-        layer_state.mlconv_out_ctx = out_ctx
-
-        return out_ctx
+        return cache.out_ctx

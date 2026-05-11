@@ -1,9 +1,8 @@
 import torch
 from typing import Tuple
 
-from selective_attention.utils.tensor_utils import  check_ndim, check_shape, to_contiguous
-from selective_attention.triton_kernels.ssd_scan.forward import ssd_scan_forward
-from selective_attention.triton_kernels.ssd_scan.backward import ssd_scan_backward
+from ..triton_kernels import ssd_scan_forward, ssd_scan_backward
+from ..utils import check_ndim, check_shape, to_contiguous
 
 class SSDScanFn(torch.autograd.Function):
     @staticmethod

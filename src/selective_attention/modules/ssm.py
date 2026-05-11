@@ -4,8 +4,8 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 
-from selective_attention.modeling.ssd_scan import SSDScanFn
-from selective_attention.modeling.inference_state import InferenceState
+from ..ops import SSDScanFn
+from ..inference import SSMCache
 
 class SSM(nn.Module):
     def __init__(
@@ -79,7 +79,7 @@ class SSM(nn.Module):
         lengths: torch.Tensor | None = None,
         ssm_hiddens: torch.Tensor | None = None, 
         conv_context: torch.Tensor | None = None,
-        state: InferenceState | None = None
+        cache: SSMCache | None = None
     ):
         """
         Args:
@@ -95,9 +95,7 @@ class SSM(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
         has_conv_context = conv_context is not None
-        is_infer = state is not None
-        if is_infer:
-            layer_state = state.layers[self.layer_idx]
+        is_infer = cache is not None
 
         hBC, gate_logits, delta_raw = torch.split(
             self.in_proj(hidden_states),
@@ -125,7 +123,7 @@ class SSM(nn.Module):
             else:
                 pad_left = cache_size - total_len
                 cached_ctx = F.pad(hBC, (pad_left, 0), value=0).detach()
-            layer_state.ssm_conv_ctx = cached_ctx
+            cache.conv_ctx = cached_ctx
         
         hBC = F.silu(hBC)
         hBC = self.conv(hBC).transpose(1, 2)
@@ -157,7 +155,7 @@ class SSM(nn.Module):
         )
 
         if is_infer:
-            layer_state.ssm_h = last_ssm_hiddens
+            cache.h = last_ssm_hiddens
         
         hidden_states = hidden_states.view(batch_size, seq_len, -1)
 
@@ -169,21 +167,19 @@ class SSM(nn.Module):
 
         return hidden_states, last_ssm_hiddens
 
-    def step(self, hidden_states: torch.Tensor, state: InferenceState):
+    def step(self, hidden_states: torch.Tensor, cache: SSMCache):
         """
         Args: (batch_size, model_dim)
         Returns: (batch_size, model_dim)
         """
-        layer_state = state.layers[self.layer_idx]
-
         hidden_states = hidden_states.unsqueeze(1)
         chunk_size = self.chunk_size
         self.chunk_size = 1
         hidden_states, _ = self.forward(
             hidden_states=hidden_states,
-            ssm_hiddens=layer_state.ssm_h,
-            conv_context=layer_state.ssm_conv_ctx,
-            state=state
+            ssm_hiddens=cache.h,
+            conv_context=cache.conv_ctx,
+            cache=cache
         )
         self.chunk_size = chunk_size
 

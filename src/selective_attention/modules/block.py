@@ -4,13 +4,12 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 
-from selective_attention.modeling.rms_norm import RMSNorm
-from selective_attention.modeling.ssm import SSM
-from selective_attention.modeling.selective_attention import SelectiveMHA
-from selective_attention.modeling.feed_forward import SwiGLU
-from selective_attention.modeling.multilevel_conv1d import MultiLevelConv1D
-from selective_attention.modeling.inference_state import InferenceState
-from selective_attention.modeling.generation_config import GenerationConfig
+from .ssm import SSM
+from .multilevel_conv1d import MultiLevelConv1D
+from .selective_attention import SelectiveMHA
+from .feed_forward import SwiGLU
+from .rms_norm import RMSNorm
+from ..inference import BlockCache, InferenceState, GenerationConfig
 
 class Block(nn.Module):
     def __init__(
@@ -54,7 +53,7 @@ class Block(nn.Module):
         lengths: torch.Tensor | None = None,
         ssm_hiddens: torch.Tensor | None = None, 
         conv_context: torch.Tensor | None = None,
-        state: InferenceState | None = None
+        cache: BlockCache | None = None
     ):
         """
         Args:
@@ -70,13 +69,13 @@ class Block(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
-        hidden_states, last_ssm_hiddens = self.ssm(hidden_states, lengths, ssm_hiddens, conv_context, state)
+        hidden_states, last_ssm_hiddens = self.ssm(hidden_states, lengths, ssm_hiddens, conv_context, cache.ssm_cache)
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv(hidden_states, lengths, state).squeeze(-1))
-        hidden_states = self.mha(hidden_states, gate, lengths, state)
+        gate = torch.sigmoid(self.gate_conv(hidden_states, lengths, cache.mlconv_cache).squeeze(-1))
+        hidden_states = self.mha(hidden_states, gate, lengths, cache.attn_cache)
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
@@ -86,7 +85,7 @@ class Block(nn.Module):
         
         return hidden_states, last_ssm_hiddens
 
-    def step(self, hidden_states: torch.Tensor, state: InferenceState, gen_cfg: GenerationConfig):
+    def step(self, hidden_states: torch.Tensor, cache: BlockCache, state: InferenceState, gen_cfg: GenerationConfig):
         """
         Args: (batch_size, model_dim)
         Returns: (batch_size, model_dim)
@@ -94,13 +93,13 @@ class Block(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
-        hidden_states = self.ssm.step(hidden_states, state)
+        hidden_states = self.ssm.step(hidden_states, cache.ssm_cache)
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv.step(hidden_states, state).squeeze(-1))
-        hidden_states = self.mha.step(hidden_states, gate, state, gen_cfg)
+        gate = torch.sigmoid(self.gate_conv.step(hidden_states, cache.mlconv_cache).squeeze(-1))
+        hidden_states = self.mha.step(hidden_states, gate, cache.attn_cache, state, gen_cfg)
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states

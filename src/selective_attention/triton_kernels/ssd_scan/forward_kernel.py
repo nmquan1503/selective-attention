@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 
-from selective_attention.triton_kernels.softplus import softplus
+from ..softplus import softplus
 
 
 @triton.autotune(

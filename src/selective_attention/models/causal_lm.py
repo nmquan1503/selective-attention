@@ -1,18 +1,30 @@
 import torch
 import torch.nn as nn
+from dataclasses import dataclass
 
-from selective_attention.modeling.block import Block
-from selective_attention.modeling.rms_norm import RMSNorm
-from selective_attention.modeling.config import Config
-from selective_attention.modeling.inference_state import InferenceState
-from selective_attention.modeling.generation_config import GenerationConfig
+from ..modules import RMSNorm, Block
+from ..inference import InferenceState, BlockCache, GenerationConfig
+
+@dataclass
+class CausalLMConfig:
+    vocab_size: int = 32000
+    model_dim: int = 512
+    head_dim: int = 64
+    ssm_state_dim: int = 64
+    ssm_conv_kernel_size: int = 4
+    ssm_num_groups: int = 1
+    ssm_chunk_size: int = 256
+    mlconv_radius: int = 2
+    num_layers: int = 4
+    dropout_rate: float = 0.15
+    device: str | None = "cuda"
 
 class CausalLM(nn.Module):
-    def __init__(self, cfg: Config | None = None):
+    def __init__(self, cfg: CausalLMConfig | None = None):
         super().__init__()
         
         if cfg is None:
-            cfg = Config()
+            cfg = CausalLMConfig
 
         self.cfg = cfg
 
@@ -41,7 +53,7 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
-        state: InferenceState | None = None
+        cache: list[BlockCache] | None = None
     ):
         """
         Args:
@@ -52,13 +64,23 @@ class CausalLM(nn.Module):
             (batch_size, seq_len, vocab_size)
         """
         hidden_states = self.embedding(input_ids)
-        for layer in self.layers:
-            hidden_states, _ = layer(hidden_states, lengths=lengths, state=state)
+        for layer_idx, layer in enumerate(self.layers):
+            hidden_states, _ = layer(
+                hidden_states, 
+                lengths=lengths, 
+                cache=cache[layer_idx] if cache is not None else None
+            )
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         return logits
 
-    def step(self, input_ids: torch.Tensor, state: InferenceState, gen_cfg: GenerationConfig):
+    def step(
+        self, 
+        input_ids: torch.Tensor,
+        cache: list[BlockCache], 
+        state: InferenceState, 
+        gen_cfg: GenerationConfig
+    ):
         """
         Args:
             input_ids: (batch_size,)
@@ -67,8 +89,8 @@ class CausalLM(nn.Module):
             logits: (batch_size, vocab_size)
         """
         hidden_states = self.embedding(input_ids)
-        for layer in self.layers:
-            hidden_states = layer.step(hidden_states, state, gen_cfg)
+        for layer_idx, layer in enumerate(self.layers):
+            hidden_states = layer.step(hidden_states, cache[layer_idx], state, gen_cfg)
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         return logits
@@ -85,11 +107,12 @@ class CausalLM(nn.Module):
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
         
+        cache = [BlockCache() for _ in range(self.cfg.num_layers)]
         state = InferenceState()
         lengths = (input_ids != gen_cfg.pad_token_id).sum(dim=1)
         last_indices = lengths - 1
 
-        logits = self.forward(input_ids, lengths, state)
+        logits = self.forward(input_ids, lengths, cache)
         logits = logits[torch.arange(batch_size, device=device), last_indices]
         
         seq_ids = torch.full(
@@ -111,7 +134,7 @@ class CausalLM(nn.Module):
             if finished.all():
                 break
 
-            logits = self.step(next_token.squeeze(1), state, gen_cfg)
+            logits = self.step(next_token.squeeze(1), cache, state, gen_cfg)
             state.step += 1
 
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
