@@ -54,35 +54,44 @@ def apply_rotary(q, k, cos, sin, mode="seq"):
 
     return q_rot, k_rot
 
-def build_attn_matrix(attn_matrix, log_gate):
+def build_attn_matrix(attn_matrix, log_gate, lengths):
     """
     Args:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
-        log_gate: (batch_size, mlconv_radius + 1, seq_len)
+        log_gate: (batch_size, mlconv_radius + 1, seq_len) | (batch_size, seq_len)
 
     Returns:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
     """
     batch_size, num_heads, seq_len, _ = attn_matrix.shape
-    mlconv_radius = log_gate.shape[1] - 1
     device = attn_matrix.device
+    is_causal = log_gate.ndim == 3
 
     idx = torch.arange(seq_len, device=device)
     rel = idx[:, None] - idx[None, :]
-    future_mask = rel < 0
-    dist = rel.clamp(min=0, max=mlconv_radius)
-    level = mlconv_radius - dist
-    log_gate = log_gate.unsqueeze(1)
-    level_idx = level.unsqueeze(0).unsqueeze(0)
-    level_idx = level_idx.expand(batch_size, num_heads, seq_len, seq_len)
-    log_gate = torch.gather(
-        log_gate.expand(batch_size, num_heads, mlconv_radius + 1, seq_len),
-        dim=2,
-        index=level_idx
-    )
-    attn_matrix = attn_matrix + log_gate
-    attn_matrix = attn_matrix.masked_fill(future_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+    
+    if is_causal:
+        mlconv_radius = log_gate.shape[1] - 1
+        future_mask = rel < 0
+        dist = rel.clamp(min=0, max=mlconv_radius)
+        level = mlconv_radius - dist
+        log_gate = log_gate.unsqueeze(1)
+        level_idx = level.unsqueeze(0).unsqueeze(0)
+        level_idx = level_idx.expand(batch_size, num_heads, seq_len, seq_len)
+        log_gate = torch.gather(
+            log_gate.expand(batch_size, num_heads, mlconv_radius + 1, seq_len),
+            dim=2,
+            index=level_idx
+        )
+        attn_matrix = attn_matrix + log_gate
+        attn_matrix = attn_matrix.masked_fill(future_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+    else:
+        attn_matrix = attn_matrix + log_gate[:, None, None, :]
+        pad_mask = idx[None, :] >= lengths[:, None]
+        attn_matrix = attn_matrix.masked_fill(pad_mask[:, None, None, :], float("-inf"))
+
     return attn_matrix
+
 
 class SelectiveMHA(nn.Module):
     def __init__(self, dim, head_dim):
@@ -110,13 +119,14 @@ class SelectiveMHA(nn.Module):
         Args:
             hidden_states: (batch_size, seq_len, dim)
             lengths: (batch_size,)
-            gate: (batch_size, mlconv_radius + 1, seq_len)
+            gate: (batch_size, mlconv_radius + 1, seq_len) | (batch_size, seq_len)
         
         Returns:
             hidden_states: (batch_size, seq_len, dim)
         """
         batch_size, seq_len, _ = hidden_states.shape
         is_infer = cache is not None
+        is_causal = gate.ndim == 3
  
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -132,7 +142,7 @@ class SelectiveMHA(nn.Module):
         scale = self.head_dim ** 0.5
         attn_matrix = (q_rot @ k_rot.transpose(-2, -1)) / scale
         log_gate = torch.log(gate.clamp(min=1e-12))
-        attn_matrix = build_attn_matrix(attn_matrix, log_gate)
+        attn_matrix = build_attn_matrix(attn_matrix, log_gate, lengths)
         
         attn_weights = F.softmax(attn_matrix, dim=-1)
 
@@ -140,7 +150,7 @@ class SelectiveMHA(nn.Module):
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
         hidden_states = self.out_proj(out)
         
-        if is_infer:
+        if is_infer and is_causal:
             cache.build(k_rot, v, log_gate, lengths)
         
         return hidden_states
