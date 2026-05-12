@@ -115,13 +115,7 @@ class SSM(nn.Module):
         if is_infer:
             # Cache conv context
             cache_size = self.conv_kernel_size - 1
-            total_len = hBC.size(2)
-            if total_len >= cache_size:
-                cached_ctx = hBC[:, :, -cache_size:].detach()
-            else:
-                pad_left = cache_size - total_len
-                cached_ctx = F.pad(hBC, (pad_left, 0), value=0).detach()
-            cache.conv_ctx = cached_ctx
+            cache.build_conv_ctx(hBC, lengths, cache_size)
         
         hBC = F.silu(hBC)
         hBC = self.conv(hBC).transpose(1, 2)
