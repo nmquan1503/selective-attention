@@ -128,12 +128,12 @@ class CausalLM(nn.Module):
             next_token = torch.argmax(probs, dim=-1)
 
             seq_ids[:, seq_len + state.step] = next_token
-            finished |= (next_token.squeeze(1) == gen_cfg.eos_token_id)
+            finished |= (next_token == gen_cfg.eos_token_id)
             
             if finished.all():
                 break
 
-            logits = self.step(next_token.squeeze(1), cache, state, gen_cfg)
+            logits = self.step(next_token, cache, state, gen_cfg)
             state.step += 1
 
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
