@@ -76,7 +76,6 @@ class SSM(nn.Module):
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
         ssm_hiddens: torch.Tensor | None = None, 
-        conv_context: torch.Tensor | None = None,
         cache: SSMCache | None = None
     ):
         """
@@ -84,7 +83,6 @@ class SSM(nn.Module):
             hidden_states: (batch_size, seq_len, model_dim)
             lengths: (batch_size,)
             ssm_hiddens: (batch_size, inner_dim, state_dim)
-            conv_context: (batch_size, hBC_dim, conv_kernel_size - 1)
         
         Returns: 
             hidden_states: (batch_size, seq_len, model_dim)
@@ -92,8 +90,8 @@ class SSM(nn.Module):
         """
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
-        has_conv_context = conv_context is not None
         is_infer = cache is not None
+        has_conv_context = is_infer and cache.conv_ctx is not None
 
         hBC, gate_logits, delta_raw = torch.split(
             self.in_proj(hidden_states),
@@ -109,13 +107,14 @@ class SSM(nn.Module):
 
         hBC = hBC.transpose(1, 2)
 
-        if has_conv_context:
-            hBC = torch.cat([conv_context, hBC], dim=2)
-
         if is_infer:
             # Cache conv context
-            cache_size = self.conv_kernel_size - 1
-            cache.build_conv_ctx(hBC, lengths, cache_size)
+            if has_conv_context:
+                hBC = torch.cat([cache.conv_ctx, hBC], dim=2)
+                cache.conv_ctx = hBC[:, :, 1:]
+            else:
+                cache_size = self.conv_kernel_size - 1
+                cache.build_conv_ctx(hBC, lengths, cache_size)
         
         hBC = F.silu(hBC)
         hBC = self.conv(hBC).transpose(1, 2)
@@ -170,7 +169,6 @@ class SSM(nn.Module):
         hidden_states, _ = self.forward(
             hidden_states=hidden_states,
             ssm_hiddens=cache.h,
-            conv_context=cache.conv_ctx,
             cache=cache
         )
         self.chunk_size = chunk_size
