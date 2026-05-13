@@ -2,57 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..inference import SelectiveAttnCache, InferenceState
-from selective_attention.inference.generation_config import GenerationConfig
-
-def rotate_half(x):
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-def build_rope_cache(seq_len_or_positions, dim, device, mode="seq"):
-    """
-    if mode == "seq":
-        Returns: 
-            cos, sin: (seq_len, dim)
-
-    if mode == "pos":
-        Returns:
-            cos, sin: (batch_size, dim)
-    """
-    assert dim % 2 == 0
-
-    half_dim = dim // 2
-    freq = 1.0 / (10000 ** (torch.arange(0, half_dim, device=device).float() / half_dim))
-
-    if mode == 'seq':
-        seq_len = seq_len_or_positions
-        pos = torch.arange(seq_len, device=device, dtype=torch.float32)
-        angles = torch.einsum("i,j->ij", pos, freq)
-    elif mode == 'pos':
-        positions = seq_len_or_positions.float()
-        angles = positions.unsqueeze(-1) * freq.unsqueeze(0) 
-    else:
-        raise ValueError(f"Unsupported mode: {mode}")
-
-    cos = torch.cos(angles).repeat_interleave(2, dim=-1)
-    sin = torch.sin(angles).repeat_interleave(2, dim=-1)
-    return cos, sin
-
-def apply_rotary(q, k, cos, sin, mode="seq"):
-    if mode == "seq":
-        cos = cos[None, None, :, :]
-        sin = sin[None, None, :, :]
-    elif mode == "pos":
-        cos = cos[:, None, :]
-        sin = sin[:, None, :]
-    else:
-        raise ValueError(f"Unsupported mode: {mode}")
-
-    q_rot = q * cos + rotate_half(q) * sin
-    k_rot = k * cos + rotate_half(k) * sin
-
-    return q_rot, k_rot
+from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig
+from .rope import RoPE
 
 def build_attn_matrix(attn_matrix, log_gate, lengths):
     """
@@ -103,6 +54,7 @@ class SelectiveMHA(nn.Module):
         self.head_dim = head_dim
         assert self.head_dim % 2 == 0, "head_dim must be even for RoPE"
 
+        self.rope = RoPE(self.head_dim)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
@@ -125,6 +77,7 @@ class SelectiveMHA(nn.Module):
             hidden_states: (batch_size, seq_len, dim)
         """
         batch_size, seq_len, _ = hidden_states.shape
+        device = hidden_states.device
         is_infer = cache is not None
         is_causal = gate.ndim == 3
  
@@ -136,8 +89,8 @@ class SelectiveMHA(nn.Module):
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        cos, sin = build_rope_cache(seq_len, self.head_dim, hidden_states.device)
-        q_rot, k_rot = apply_rotary(q, k, cos, sin)
+        positions = torch.arange(seq_len, device=device)
+        q_rot, k_rot = self.rope(q, k, positions, mode="seq")
 
         scale = self.head_dim ** 0.5
         attn_matrix = (q_rot @ k_rot.transpose(-2, -1)) / scale
@@ -177,7 +130,7 @@ class SelectiveMHA(nn.Module):
         device = hidden_states.device
 
         if state.step % gen_cfg.cache_update_interval == 0:
-            cache.reset(mlconv_radius, gen_cfg.attn_gate_threshold, gen_cfg.cache_update_interval)
+            cache.reset(state.lengths, mlconv_radius, gen_cfg.attn_gate_threshold, gen_cfg.cache_update_interval)
         
         log_gate = torch.log(gate)
 
@@ -189,8 +142,7 @@ class SelectiveMHA(nn.Module):
         k = k.view(batch_size, self.num_heads, self.head_dim)
         v = v.view(batch_size, self.num_heads, self.head_dim)
 
-        cos, sin = build_rope_cache(cache.lengths, self.head_dim, device, mode='pos')
-        q_rot, k_rot = apply_rotary(q, k, cos, sin, mode='pos')
+        q_rot, k_rot = self.rope(q, k, cache.lengths, mode="pos")
 
         cache.update(k_rot, v, log_gate, gen_cfg.attn_gate_threshold)
 

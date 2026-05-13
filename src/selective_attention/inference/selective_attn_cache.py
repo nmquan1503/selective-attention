@@ -46,7 +46,6 @@ class SelectiveAttnCache:
         self.k_rot = None   # (batch_size, num_heads, compressed_len, head_dim)
         self.v = None   # (batch_size, num_heads, compressed_len, head_dim)
         self.log_gate = None    # (batch_size, compressed_len)
-        self.lengths = None # (batch_size,)
         self.write_idx = 0
         self.valid_mask = None  # (batch_size, compressed_len)
 
@@ -70,7 +69,6 @@ class SelectiveAttnCache:
 
         self.k_rot = k_rot
         self.v = v
-        self.lengths = lengths
         
         pos = torch.arange(seq_len, device=device).unsqueeze(0)
         level_idx = torch.clamp(
@@ -86,18 +84,23 @@ class SelectiveAttnCache:
     
     def reset(
         self, 
+        lengths: torch.Tensor,
         mlconv_radius: int,
         gate_threshold: float,
         buffer_size: int,
     ):
+        """
+        Args:
+            lengths: (batch_size,)
+        """
         device = self.k_rot.device
 
         if self.valid_mask is None:
             compressed_len = self.v.shape[2]
             pos = torch.arange(compressed_len, device=device).unsqueeze(0)
-            valid_mask = pos < self.lengths.unsqueeze(1)
+            valid_mask = pos < lengths.unsqueeze(1)
             gate_mask = self.log_gate >= math.log(gate_threshold)
-            tail_start = self.lengths - mlconv_radius
+            tail_start = lengths - mlconv_radius
             tail_mask = pos >= tail_start.unsqueeze(1)
             self.valid_mask = valid_mask & (gate_mask | tail_mask)
         
@@ -144,6 +147,5 @@ class SelectiveAttnCache:
         self.log_gate[:, self.write_idx-mlconv_radius : self.write_idx+1] = log_gate
         self.k_rot[:, :, self.write_idx, :] = k_rot
         self.v[:, :, self.write_idx, :] = v
-        self.lengths += 1
         self.write_idx += 1
 

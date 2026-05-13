@@ -107,10 +107,10 @@ class CausalLM(nn.Module):
         device = input_ids.device
         
         cache = [CausalBlockCache() for _ in range(self.cfg.num_layers)]
-        state = InferenceState()
         lengths = (input_ids != gen_cfg.pad_token_id).sum(dim=1)
-        last_indices = lengths - 1
+        state = InferenceState(lengths)
 
+        last_indices = lengths - 1
         logits = self.forward(input_ids, lengths, cache)
         logits = logits[torch.arange(batch_size, device=device), last_indices]
         
@@ -134,7 +134,7 @@ class CausalLM(nn.Module):
                 break
 
             logits = self.step(next_token, cache, state, gen_cfg)
-            state.step += 1
+            state.update()
 
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
         first_eos = eos_mask.float().cumsum(dim=1) >= 1

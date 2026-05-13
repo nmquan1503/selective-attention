@@ -176,7 +176,9 @@ class Seq2SeqLM(nn.Module):
         cache = [CrossBlockCache() for _ in range(self.cfg.num_layers)]
         for layer_idx in range(1, self.cfg.num_layers):
             cache[layer_idx].cross_attn_cache = cache[0]
-        state = InferenceState()
+        state = InferenceState(
+            lengths=torch.ones(batch_size, dtype=torch.long, device=device)
+        )
 
         lengths = (input_ids != gen_cfg.pad_token_id).sum(dim=1)
         seq_ids = torch.full(
@@ -203,7 +205,7 @@ class Seq2SeqLM(nn.Module):
                 break
         
             logits = self.step(next_token, cache, state, gen_cfg)
-            state.step += 1
+            state.update()
         
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
         first_eos = eos_mask.float().cumsum(dim=1) >= 1
