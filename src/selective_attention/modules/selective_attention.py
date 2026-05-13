@@ -142,7 +142,7 @@ class SelectiveMHA(nn.Module):
         k = k.view(batch_size, self.num_heads, self.head_dim)
         v = v.view(batch_size, self.num_heads, self.head_dim)
 
-        q_rot, k_rot = self.rope(q, k, cache.lengths, mode="pos")
+        q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
 
         cache.update(k_rot, v, log_gate, gen_cfg.attn_gate_threshold)
 
