@@ -4,7 +4,7 @@ from .cross_selective_attention import CrossSelectiveMHA
 from .multilevel_conv1d import MultiLevelConv1D
 from .rms_norm import RMSNorm
 from .feed_forward import SwiGLU
-from .block import Block
+from .causal_block import CausalBlock
 from .bi_block import BiBlock
 from .cross_block import CrossBlock
 
@@ -15,7 +15,7 @@ __all__ = [
     "MultiLevelConv1D",
     "RMSNorm",
     "SwiGLU",
-    "Block",
+    "CausalBlock",
     "BiBlock",
     "CrossBlock"
 ]

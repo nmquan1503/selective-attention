@@ -9,9 +9,9 @@ from .multilevel_conv1d import MultiLevelConv1D
 from .selective_attention import SelectiveMHA
 from .feed_forward import SwiGLU
 from .rms_norm import RMSNorm
-from ..inference import BlockCache, InferenceState, GenerationConfig
+from ..inference import CausalBlockCache, InferenceState, GenerationConfig
 
-class Block(nn.Module):
+class CausalBlock(nn.Module):
     def __init__(
         self,
         model_dim: int = 512,
@@ -50,7 +50,7 @@ class Block(nn.Module):
         lengths: torch.Tensor | None = None,
         ssm_hiddens: torch.Tensor | None = None, 
         conv_context: torch.Tensor | None = None,
-        cache: BlockCache | None = None
+        cache: CausalBlockCache | None = None
     ):
         """
         Args:
@@ -97,7 +97,7 @@ class Block(nn.Module):
         
         return hidden_states, last_ssm_hiddens
 
-    def step(self, hidden_states: torch.Tensor, cache: BlockCache, state: InferenceState, gen_cfg: GenerationConfig):
+    def step(self, hidden_states: torch.Tensor, cache: CausalBlockCache, state: InferenceState, gen_cfg: GenerationConfig):
         """
         Args: (batch_size, model_dim)
         Returns: (batch_size, model_dim)

@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 
-from ..modules import RMSNorm, Block
-from ..inference import InferenceState, BlockCache, GenerationConfig
+from ..modules import RMSNorm, CausalBlock
+from ..inference import InferenceState, CausalBlockCache, GenerationConfig
 
 @dataclass
 class CausalLMConfig:
@@ -30,7 +30,7 @@ class CausalLM(nn.Module):
 
         self.embedding = nn.Embedding(cfg.vocab_size, cfg.model_dim)
         self.layers = nn.ModuleList([
-            Block(
+            CausalBlock(
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
                 ssm_state_dim=cfg.ssm_state_dim,
@@ -52,7 +52,7 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
-        cache: list[BlockCache] | None = None
+        cache: list[CausalBlockCache] | None = None
     ):
         """
         Args:
@@ -76,7 +76,7 @@ class CausalLM(nn.Module):
     def step(
         self, 
         input_ids: torch.Tensor,
-        cache: list[BlockCache], 
+        cache: list[CausalBlockCache], 
         state: InferenceState, 
         gen_cfg: GenerationConfig
     ):
@@ -106,7 +106,7 @@ class CausalLM(nn.Module):
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
         
-        cache = [BlockCache() for _ in range(self.cfg.num_layers)]
+        cache = [CausalBlockCache() for _ in range(self.cfg.num_layers)]
         state = InferenceState()
         lengths = (input_ids != gen_cfg.pad_token_id).sum(dim=1)
         last_indices = lengths - 1
