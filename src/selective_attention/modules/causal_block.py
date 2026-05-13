@@ -48,16 +48,12 @@ class CausalBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
-        ssm_hiddens: torch.Tensor | None = None, 
-        conv_context: torch.Tensor | None = None,
         cache: CausalBlockCache | None = None
     ):
         """
         Args:
             hidden_states: (batch_size, seq_len, model_dim)
             lengths: (batch_size,)
-            ssm_hiddens: (batch_size, inner_dim, state_dim)
-            conv_context: (batch_size, hBC_dim, conv_kernel - 1)
         
         Returns: 
             hidden_states: (batch_size, seq_len, model_dim)
@@ -67,26 +63,24 @@ class CausalBlock(nn.Module):
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
         hidden_states, last_ssm_hiddens = self.ssm(
-            hidden_states, 
-            lengths, 
-            ssm_hiddens, 
-            conv_context, 
-            cache.ssm_cache if cache is not None else None
+            hidden_states=hidden_states, 
+            lengths=lengths, 
+            cache=cache.ssm_cache if cache is not None else None
         )
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
         gate = torch.sigmoid(self.gate_conv(
-            hidden_states, 
-            lengths, 
-            cache.mlconv_cache if cache is not None else None
+            x=hidden_states, 
+            lengths=lengths, 
+            cache=cache.mlconv_cache if cache is not None else None
         ).squeeze(-1))
         hidden_states = self.mha(
-            hidden_states, 
-            gate, 
-            lengths, 
-            cache.attn_cache if cache is not None else None
+            hidden_states=hidden_states, 
+            gate=gate, 
+            lengths=lengths, 
+            cache=cache.attn_cache if cache is not None else None
         )
         hidden_states = res + self.dropout(hidden_states)
 
@@ -105,13 +99,25 @@ class CausalBlock(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
-        hidden_states = self.ssm.step(hidden_states, cache.ssm_cache)
+        hidden_states = self.ssm.step(
+            hidden_states=hidden_states, 
+            cache=cache.ssm_cache
+        )
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv.step(hidden_states, cache.mlconv_cache).squeeze(-1))
-        hidden_states = self.mha.step(hidden_states, gate, cache.attn_cache, state, gen_cfg)
+        gate = torch.sigmoid(self.gate_conv.step(
+            x=hidden_states, 
+            cache=cache.mlconv_cache
+        ).squeeze(-1))
+        hidden_states = self.mha.step(
+            hidden_states=hidden_states, 
+            gate=gate, 
+            cache=cache.attn_cache, 
+            state=state, 
+            gen_cfg=gen_cfg
+        )
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states

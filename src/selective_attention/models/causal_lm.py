@@ -65,7 +65,7 @@ class CausalLM(nn.Module):
         hidden_states = self.embedding(input_ids)
         for layer_idx, layer in enumerate(self.layers):
             hidden_states, _ = layer(
-                hidden_states, 
+                hidden_states=hidden_states, 
                 lengths=lengths, 
                 cache=cache[layer_idx] if cache is not None else None
             )
