@@ -185,10 +185,9 @@ class SSM(nn.Module):
         B = B.view(batch_size, self.num_groups, self.state_dim)
         C = C.view(batch_size, self.num_groups, self.state_dim)
 
-        hidden_states, last_ssm_hiddens = SSUFn(
-            hidden_states, A, B, C, delta_raw, self.delta_bias
+        hidden_states, cache.h = SSUFn(
+            hidden_states, A, B, C, delta_raw, self.delta_bias, cache.h
         )
-        cache.h = last_ssm_hiddens
 
         hidden_states = hidden_states.view(batch_size, -1)
         hidden_states = hidden_states + self.D * ssm_residual
