@@ -185,7 +185,7 @@ class SSM(nn.Module):
         B = B.view(batch_size, self.num_groups, self.state_dim)
         C = C.view(batch_size, self.num_groups, self.state_dim)
 
-        hidden_states, cache.h = SSUFn(
+        hidden_states, cache.h = SSUFn.forward(
             hidden_states, A, B, C, delta_raw, self.delta_bias, cache.h
         )
 

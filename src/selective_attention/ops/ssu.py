@@ -6,6 +6,7 @@ from ..triton_kernels import ssu_forward
 from ..utils import check_ndim, check_shape, to_contiguous
 
 class SSUFn(nn.Module):
+    @staticmethod
     @torch.inference_mode()
     def forward(
         self, 
