@@ -32,7 +32,7 @@ class SSUFn(nn.Module):
             y: (batch_size, num_heads, head_dim)
             h: (batch_size, num_heads, head_dim, state_dim)
         """
-        check_ndim(u, 4, name="u")
+        check_ndim(u, 3, name="u")
         check_ndim(A, 1, name="A")
         check_ndim(B, 3, name="B")
         check_ndim(C, 3, name="C")
