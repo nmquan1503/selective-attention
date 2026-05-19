@@ -9,7 +9,6 @@ class SSUFn(nn.Module):
     @staticmethod
     @torch.inference_mode()
     def forward(
-        self, 
         u: torch.Tensor,
         A: torch.Tensor,
         B: torch.Tensor,
