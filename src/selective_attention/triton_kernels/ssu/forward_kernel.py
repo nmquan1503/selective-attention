@@ -62,10 +62,11 @@ def ssu_forward_kernel(
         delta = delta_raw + delta_bias
     else:
         delta= delta_raw
-    delta = tl.minimum(tl.maximum(delta, delta_min), delta_max)
 
     if USE_DELTA_SOFTPLUS:
         delta = tl.where(delta <= 20.0, softplus(delta), delta)
+    
+    delta = tl.minimum(tl.maximum(delta, delta_min), delta_max)
     
     h = tl.load(h_ptrs, mask=(head_element_ids[:, None] < head_dim) & (state_element_ids[None, :] < state_dim), other=0.0)
 
