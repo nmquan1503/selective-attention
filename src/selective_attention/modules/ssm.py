@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 
-from ..ops import SSDScanFn
+from ..ops import SSDScanFn, SSUFn
 from ..inference import SSMCache
 
 class SSM(nn.Module):
@@ -91,7 +91,6 @@ class SSM(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
         is_infer = cache is not None
-        has_conv_context = is_infer and cache.conv_ctx is not None
 
         hBC, gate_logits, delta_raw = torch.split(
             self.in_proj(hidden_states),
@@ -108,21 +107,12 @@ class SSM(nn.Module):
         hBC = hBC.transpose(1, 2)
 
         if is_infer:
-            # Cache conv context
-            if has_conv_context:
-                hBC = torch.cat([cache.conv_ctx, hBC], dim=2)
-                cache.conv_ctx = hBC[:, :, 1:]
-            else:
-                cache_size = self.conv_kernel_size - 1
-                cache.build_conv_ctx(hBC, lengths, cache_size)
+            cache_size = self.conv_kernel_size
+            cache.build_conv_ctx(hBC, lengths, cache_size)
         
         hBC = F.silu(hBC)
         hBC = self.conv(hBC).transpose(1, 2)
-
-        if has_conv_context:
-            hBC = hBC[:, self.conv_kernel_size - 1 : self.conv_kernel_size - 1 + seq_len]
-        else:
-            hBC = hBC[:, :seq_len]
+        hBC = hBC[:, :seq_len]
 
         hidden_states, B, C = torch.split(
             hBC,
@@ -149,11 +139,9 @@ class SSM(nn.Module):
             cache.h = last_ssm_hiddens
         
         hidden_states = hidden_states.view(batch_size, seq_len, -1)
-
         hidden_states = hidden_states + self.D * ssm_residual
 
         hidden_states = hidden_states * F.silu(gate_logits)
-
         hidden_states = self.out_proj(hidden_states)
 
         return hidden_states, last_ssm_hiddens
@@ -163,14 +151,49 @@ class SSM(nn.Module):
         Args: (batch_size, model_dim)
         Returns: (batch_size, model_dim)
         """
-        hidden_states = hidden_states.unsqueeze(1)
-        chunk_size = self.chunk_size
-        self.chunk_size = 1
-        hidden_states, _ = self.forward(
-            hidden_states=hidden_states,
-            ssm_hiddens=cache.h,
-            cache=cache
-        )
-        self.chunk_size = chunk_size
+        batch_size = hidden_states.shape[0]
 
-        return hidden_states.squeeze(1)
+        hBC, gate_logits, delta_raw = torch.split(
+            self.in_proj(hidden_states),
+            [
+                self.inner_dim + 2 * self.num_groups * self.state_dim,
+                self.inner_dim,
+                self.num_heads
+            ],
+            dim=-1
+        )
+
+        cache.update(hBC)
+        hBC = cache.conv_ctx
+        hBC = F.silu(hBC)
+        hBC = (hBC * self.conv.weight.squeeze(1)).sum(dim=-1) + self.conv.bias
+        hidden_states, B, C = torch.split(
+            hBC,
+            [
+                self.inner_dim,
+                self.num_groups * self.state_dim,
+                self.num_groups * self.state_dim
+            ],
+            dim=-1
+        )
+
+        A = -torch.exp(self.A_log)
+
+        ssm_residual = hidden_states
+
+        hidden_states = hidden_states.view(batch_size, self.num_heads, self.head_dim)
+        B = B.view(batch_size, self.num_groups, self.state_dim)
+        C = C.view(batch_size, self.num_groups, self.state_dim)
+
+        hidden_states, last_ssm_hiddens = SSUFn(
+            hidden_states, A, B, C, delta_raw, self.delta_bias
+        )
+        cache.h = last_ssm_hiddens
+
+        hidden_states = hidden_states.view(batch_size, -1)
+        hidden_states = hidden_states + self.D * ssm_residual
+
+        hidden_states = hidden_states * F.silu(gate_logits)
+        hidden_states = self.out_proj(hidden_states)
+        
+        return hidden_states
