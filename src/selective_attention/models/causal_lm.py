@@ -63,14 +63,26 @@ class CausalLM(nn.Module):
             (batch_size, seq_len, vocab_size)
         """
         hidden_states = self.embedding(input_ids)
+        gates = []
+        
         for layer_idx, layer in enumerate(self.layers):
-            hidden_states, _ = layer(
+            layer_output = layer(
                 hidden_states=hidden_states, 
                 lengths=lengths, 
                 cache=cache[layer_idx] if cache is not None else None
             )
+            if self.training:
+                hidden_states, _, gate = layer_output
+                gates.append(gate)
+            else:
+                hidden_states = layer_output[0]
+        
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
+        
+        if self.training:
+            return logits, torch.stack(gates)
+        
         return logits
 
     def step(

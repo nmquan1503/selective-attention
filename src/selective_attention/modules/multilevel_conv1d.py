@@ -19,7 +19,7 @@ class MultiLevelConv1D(nn.Module):
             padding=radius
         )
         self.right_linears = nn.ModuleList([
-            nn.Linear(in_channels, out_channels)
+            nn.Linear(in_channels, out_channels, bias=False)
             for _ in range(radius)
         ])
 

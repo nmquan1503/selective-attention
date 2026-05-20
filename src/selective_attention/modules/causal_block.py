@@ -76,9 +76,13 @@ class CausalBlock(nn.Module):
             lengths=lengths, 
             cache=cache.mlconv_cache if cache is not None else None
         ).squeeze(-1))
+        hard_gate = (gate > 0.5).float()
+        if self.training:
+            hard_gate = hard_gate.detach() + gate - gate.detach()
+        
         hidden_states = self.mha(
             hidden_states=hidden_states, 
-            gate=gate, 
+            gate=hard_gate, 
             lengths=lengths, 
             cache=cache.attn_cache if cache is not None else None
         )
@@ -89,6 +93,9 @@ class CausalBlock(nn.Module):
         hidden_states = self.ffn(hidden_states)
         hidden_states = res + self.dropout(hidden_states)
         
+        if self.training:
+            return hidden_states, last_ssm_hiddens, gate
+    
         return hidden_states, last_ssm_hiddens
 
     def step(self, hidden_states: torch.Tensor, cache: CausalBlockCache, state: InferenceState, gen_cfg: GenerationConfig):
@@ -111,9 +118,10 @@ class CausalBlock(nn.Module):
             x=hidden_states, 
             cache=cache.mlconv_cache
         ).squeeze(-1))
+        hard_gate = (gate > gen_cfg.attn_gate_threshold).float()
         hidden_states = self.mha.step(
             hidden_states=hidden_states, 
-            gate=gate, 
+            gate=hard_gate, 
             cache=cache.attn_cache, 
             state=state, 
             gen_cfg=gen_cfg
