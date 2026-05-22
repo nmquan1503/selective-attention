@@ -5,51 +5,67 @@ import torch.nn.functional as F
 from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig
 from .rope import RoPE
 
-def build_attn_matrix(attn_matrix, log_gate, lengths):
+def build_attn_matrix(
+    attn_matrix: torch.Tensor, 
+    hard_gate: torch.Tensor, 
+    lengths: torch.Tensor,
+    is_infer: float = False
+):
     """
     Args:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
-        log_gate: (batch_size, mlconv_radius + 1, seq_len) | (batch_size, seq_len)
+        hard_gate: (batch_size, mlconv_radius + 1, seq_len) | (batch_size, seq_len)
 
     Returns:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
     """
     batch_size, num_heads, seq_len, _ = attn_matrix.shape
     device = attn_matrix.device
-    is_causal = log_gate.ndim == 3
+    is_causal = hard_gate.ndim == 3
 
     idx = torch.arange(seq_len, device=device)
     rel = idx[:, None] - idx[None, :]
-    diag_mask = torch.eye(seq_len, device=device, dtype=torch.bool)
+    diag_mask = (rel == 0)
     
     if is_causal:
-        mlconv_radius = log_gate.shape[1] - 1
-        future_mask = rel < 0
+        mlconv_radius = hard_gate.shape[1] - 1
         dist = rel.clamp(min=0, max=mlconv_radius)
         level = mlconv_radius - dist
-        log_gate = log_gate.unsqueeze(1)
+        hard_gate = hard_gate.unsqueeze(1)
         level_idx = level.unsqueeze(0).unsqueeze(0)
         level_idx = level_idx.expand(batch_size, num_heads, seq_len, seq_len)
-        log_gate = torch.gather(
-            log_gate.expand(batch_size, num_heads, mlconv_radius + 1, seq_len),
+        hard_gate = torch.gather(
+            hard_gate.expand(batch_size, num_heads, mlconv_radius + 1, seq_len),
             dim=2,
             index=level_idx
         )
-        log_gate = log_gate.masked_fill(
+        hard_gate = hard_gate.masked_fill(
             diag_mask.unsqueeze(0).unsqueeze(0),
-            0.0
+            1.0
         )
-        attn_matrix = attn_matrix + log_gate
+        if is_infer:
+            attn_matrix = attn_matrix.masked_fill((hard_gate == 0), float("-inf"))
+        else:
+            log_gate = torch.log(hard_gate.clamp(min=1e-12))
+            attn_matrix = attn_matrix + log_gate
+        
+        future_mask = rel < 0
         attn_matrix = attn_matrix.masked_fill(future_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+    
     else:
-        log_gate = log_gate[:, None, None, :].expand(
+        hard_gate = hard_gate[:, None, None, :].expand(
             batch_size, 1, seq_len, seq_len
         )
-        log_gate = log_gate.masked_fill(
+        hard_gate = hard_gate.masked_fill(
             diag_mask.unsqueeze(0).unsqueeze(0),
-            0.0
+            1.0
         )
-        attn_matrix = attn_matrix + log_gate
+        if is_infer:
+            attn_matrix = attn_matrix.masked_fill((hard_gate == 0), float("-inf"))
+        else:
+            log_gate = torch.log(hard_gate.clamp(min=1e-12))
+            attn_matrix = attn_matrix + log_gate
+        
         pad_mask = idx[None, :] >= lengths[:, None]
         attn_matrix = attn_matrix.masked_fill(pad_mask[:, None, None, :], float("-inf"))
 
@@ -77,6 +93,7 @@ class SelectiveMHA(nn.Module):
         hidden_states: torch.Tensor, 
         gate: torch.Tensor,
         lengths: torch.Tensor | None = None, 
+        gate_threshold: float | None = None,
         cache: SelectiveAttnCache | None = None
     ):
         """
@@ -92,6 +109,12 @@ class SelectiveMHA(nn.Module):
         device = hidden_states.device
         is_infer = cache is not None
         is_causal = gate.ndim == 3
+
+        if is_infer:
+            hard_gate = (gate > gate_threshold).float()
+        else:
+            hard_gate = (gate > 0.5).float()
+            hard_gate = hard_gate.detach() + gate - gate.detach()
  
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -106,8 +129,7 @@ class SelectiveMHA(nn.Module):
 
         scale = self.head_dim ** 0.5
         attn_matrix = (q_rot @ k_rot.transpose(-2, -1)) / scale
-        log_gate = torch.log(gate.clamp(min=1e-12))
-        attn_matrix = build_attn_matrix(attn_matrix, log_gate, lengths)
+        attn_matrix = build_attn_matrix(attn_matrix, hard_gate, lengths, is_infer)
         
         attn_weights = F.softmax(attn_matrix, dim=-1)
 
@@ -116,7 +138,7 @@ class SelectiveMHA(nn.Module):
         hidden_states = self.out_proj(out)
         
         if is_infer and is_causal:
-            cache.build(k_rot, v, log_gate, lengths)
+            cache.build(k_rot, v, hard_gate, lengths)
         
         return hidden_states
 
@@ -142,10 +164,8 @@ class SelectiveMHA(nn.Module):
         device = hidden_states.device
 
         if state.step % gen_cfg.cache_update_interval == 0:
-            cache.reset(state.lengths, mlconv_radius, gen_cfg.attn_gate_threshold, gen_cfg.cache_update_interval)
+            cache.reset(mlconv_radius, gen_cfg.cache_update_interval)
         
-        log_gate = torch.log(gate)
-
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
@@ -156,14 +176,14 @@ class SelectiveMHA(nn.Module):
 
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
 
-        cache.update(k_rot, v, log_gate, gen_cfg.attn_gate_threshold)
+        cache.update(k_rot, v, gate > gen_cfg.attn_gate_threshold)
 
         scale = self.head_dim ** 0.5
         attn_matrix = (q_rot.unsqueeze(2) @ cache.k_rot[:, :, :cache.write_idx, :].transpose(-2, -1)) / scale
-        attn_matrix = attn_matrix + cache.log_gate[:, None, None, :cache.write_idx]
-
+        valid_mask = cache.valid_mask[:, :cache.write_idx]
+        valid_mask[:, -1] = True
         attn_matrix = attn_matrix.masked_fill(
-            cache.valid_mask[:, None, None, :cache.write_idx] == 0,
+            valid_mask[:, None, None, :] == 0,
             float("-inf")
         )
 

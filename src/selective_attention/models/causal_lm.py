@@ -52,6 +52,7 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
+        attn_gate_threshold: float | None = None,
         cache: list[CausalBlockCache] | None = None
     ):
         """
@@ -62,16 +63,19 @@ class CausalLM(nn.Module):
         Returns:
             (batch_size, seq_len, vocab_size)
         """
+        is_infer = cache is not None
+
         hidden_states = self.embedding(input_ids)
         gates = []
         
         for layer_idx, layer in enumerate(self.layers):
             layer_output = layer(
                 hidden_states=hidden_states, 
-                lengths=lengths, 
-                cache=cache[layer_idx] if cache is not None else None
+                lengths=lengths,
+                attn_gate_threshold=attn_gate_threshold,
+                cache=cache[layer_idx] if is_infer else None
             )
-            if self.training:
+            if not is_infer:
                 hidden_states, _, gate = layer_output
                 gates.append(gate)
             else:
@@ -80,7 +84,7 @@ class CausalLM(nn.Module):
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         
-        if self.training:
+        if not is_infer:
             return logits, torch.stack(gates)
         
         return logits
@@ -123,7 +127,7 @@ class CausalLM(nn.Module):
         state = InferenceState(lengths)
 
         last_indices = lengths - 1
-        logits = self.forward(input_ids, lengths, cache)
+        logits = self.forward(input_ids, lengths, gen_cfg.attn_gate_threshold, cache)
         logits = logits[torch.arange(batch_size, device=device), last_indices]
         
         seq_ids = torch.full(

@@ -23,7 +23,7 @@ def _right_align(
     shift = max_valid - num_valid
     out = torch.empty(
         batch_size, num_heads, max_valid + buffer_size, head_dim,
-        device=device, dtype=torch.float32
+        device=device, dtype=x.dtype
     )
     src_valid = x.permute(0, 2, 1, 3)[valid_mask]
     batch_idx = torch.arange(batch_size, device=device)
@@ -45,7 +45,6 @@ class SelectiveAttnCache:
     def __init__(self):
         self.k_rot = None   # (batch_size, num_heads, compressed_len, head_dim)
         self.v = None   # (batch_size, num_heads, compressed_len, head_dim)
-        self.log_gate = None    # (batch_size, compressed_len)
         self.write_idx = 0
         self.valid_mask = None  # (batch_size, compressed_len)
 
@@ -53,18 +52,18 @@ class SelectiveAttnCache:
         self,
         k_rot: torch.Tensor,
         v: torch.Tensor,
-        log_gate: torch.Tensor,
+        hard_gate: torch.Tensor,
         lengths: torch.Tensor
     ):
         """
         Args:
             k_rot: (batch_size, num_heads, seq_len, head_dim)
             v: (batch_size, num_heads, seq_len, head_dim)
-            log_gate: (batch_size, mlconv_radius + 1, seq_len)
+            hard_gate: (batch_size, mlconv_radius + 1, seq_len)
             lengths: (batch_size)
         """
-        batch_size, _, seq_len = log_gate.shape
-        mlconv_radius = log_gate.size(1) - 1
+        batch_size, _, seq_len = hard_gate.shape
+        mlconv_radius = hard_gate.size(1) - 1
         device = k_rot.device
 
         self.k_rot = k_rot
@@ -76,41 +75,28 @@ class SelectiveAttnCache:
             min=0,
             max=mlconv_radius
         )
-        self.log_gate = log_gate[
+        hard_gate = hard_gate[
             torch.arange(batch_size, device=device).unsqueeze(1),
             level_idx,
             pos
         ]
-    
-    def reset(
-        self, 
-        lengths: torch.Tensor,
-        mlconv_radius: int,
-        gate_threshold: float,
-        buffer_size: int,
-    ):
-        """
-        Args:
-            lengths: (batch_size,)
-        """
-        device = self.k_rot.device
-
-        if self.valid_mask is None:
-            compressed_len = self.v.shape[2]
-            pos = torch.arange(compressed_len, device=device).unsqueeze(0)
-            valid_mask = pos < lengths.unsqueeze(1)
-            gate_mask = self.log_gate >= math.log(gate_threshold)
-            tail_start = lengths - mlconv_radius
-            tail_mask = pos >= tail_start.unsqueeze(1)
-            self.valid_mask = valid_mask & (gate_mask | tail_mask)
-        
-        self.log_gate, _ = _right_align(
-            self.log_gate.unsqueeze(1).unsqueeze(-1),
-            self.valid_mask,
-            buffer_size=buffer_size
+        self.valid_mask = pos < lengths.unsqueeze(1)
+        hard_gate, _ = _right_align(
+            hard_gate[:, None, :, None], self.valid_mask, buffer_size=0
         )
-        self.log_gate = self.log_gate.squeeze(-1).squeeze(1)
-
+        hard_gate = hard_gate.squeeze(-1).squeeze(1)
+        self.k_rot, _ = _right_align(
+            self.k_rot, self.valid_mask, buffer_size=0
+        )
+        self.v, self.valid_mask = _right_align(
+            self.v, self.valid_mask, buffer_size=0
+        )
+        self.valid_mask = self.valid_mask & (hard_gate == 1)
+        self.write_idx = self.k_rot.shape[2]
+ 
+    def reset(self, mlconv_radius: int, buffer_size: int):
+        last = self.valid_mask[:, -mlconv_radius:].clone()
+        self.valid_mask[:, -mlconv_radius:] = True
         self.k_rot, _ = _right_align(
             self.k_rot,
             self.valid_mask,
@@ -122,6 +108,7 @@ class SelectiveAttnCache:
             self.valid_mask,
             buffer_size=buffer_size
         )
+        self.valid_mask[:, -mlconv_radius-buffer_size:-buffer_size] = last
 
         self.write_idx = self.k_rot.shape[2] - buffer_size
 
@@ -129,23 +116,17 @@ class SelectiveAttnCache:
         self,
         k_rot: torch.Tensor,
         v: torch.Tensor,
-        log_gate: torch.Tensor,
-        gate_threshold: float
+        hard_gate: torch.Tensor
     ):
         """
         Args:
             k_rot: (batch_size, self.num_heads, self.head_dim)
             v: (batch_size, self.num_heads, self.head_dim)
-            log_gate: (batch_size, mlconv_radius + 1)
+            hard_gate: (batch_size, mlconv_radius + 1)
         """
-        mlconv_radius = log_gate.size(1) - 1
+        mlconv_radius = hard_gate.size(1) - 1
 
-        remove_mask = log_gate[:, 0] < math.log(gate_threshold)
-        self.valid_mask[remove_mask, self.write_idx-mlconv_radius] = False
-        self.valid_mask[:, self.write_idx] = True
-        
-        self.log_gate[:, self.write_idx-mlconv_radius : self.write_idx+1] = log_gate
+        self.valid_mask[:, self.write_idx-mlconv_radius:self.write_idx + 1] = (hard_gate == 1)
         self.k_rot[:, :, self.write_idx, :] = k_rot
         self.v[:, :, self.write_idx, :] = v
         self.write_idx += 1
-
