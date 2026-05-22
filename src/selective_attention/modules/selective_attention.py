@@ -20,6 +20,7 @@ def build_attn_matrix(attn_matrix, log_gate, lengths):
 
     idx = torch.arange(seq_len, device=device)
     rel = idx[:, None] - idx[None, :]
+    diag_mask = torch.eye(seq_len, device=device, dtype=torch.bool)
     
     if is_causal:
         mlconv_radius = log_gate.shape[1] - 1
@@ -34,10 +35,21 @@ def build_attn_matrix(attn_matrix, log_gate, lengths):
             dim=2,
             index=level_idx
         )
+        log_gate = log_gate.masked_fill(
+            diag_mask.unsqueeze(0).unsqueeze(0),
+            0.0
+        )
         attn_matrix = attn_matrix + log_gate
         attn_matrix = attn_matrix.masked_fill(future_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
     else:
-        attn_matrix = attn_matrix + log_gate[:, None, None, :]
+        log_gate = log_gate[:, None, None, :].expand(
+            batch_size, 1, seq_len, seq_len
+        )
+        log_gate = log_gate.masked_fill(
+            diag_mask.unsqueeze(0).unsqueeze(0),
+            0.0
+        )
+        attn_matrix = attn_matrix + log_gate
         pad_mask = idx[None, :] >= lengths[:, None]
         attn_matrix = attn_matrix.masked_fill(pad_mask[:, None, None, :], float("-inf"))
 
