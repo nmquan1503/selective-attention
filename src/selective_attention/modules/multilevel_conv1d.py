@@ -23,6 +23,11 @@ class MultiLevelConv1D(nn.Module):
             for _ in range(radius)
         ])
 
+        nn.init.normal_(self.causal_conv1d.weight, mean=0.0, std=1e-2)
+        nn.init.constant_(self.causal_conv1d.bias, 2.0)
+        for linear in self.right_linears:
+            nn.init.normal_(linear.weight, mean=0.0, std=1e-2)
+
     def forward(
         self, 
         x: torch.Tensor,
