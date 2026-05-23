@@ -5,11 +5,10 @@ import torch.nn.functional as F
 from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig
 from .rope import RoPE
 
-def build_attn_matrix(
-    attn_matrix: torch.Tensor, 
+def _build_gate_matrix(
     hard_gate: torch.Tensor, 
     lengths: torch.Tensor,
-    is_infer: float = False
+    num_heads: int,
 ):
     """
     Args:
@@ -19,8 +18,9 @@ def build_attn_matrix(
     Returns:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
     """
-    batch_size, num_heads, seq_len, _ = attn_matrix.shape
-    device = attn_matrix.device
+    batch_size = hard_gate.shape[0]
+    seq_len = hard_gate.shape[-1]
+    device = hard_gate.device
     is_causal = hard_gate.ndim == 3
 
     idx = torch.arange(seq_len, device=device)
@@ -34,43 +34,48 @@ def build_attn_matrix(
         hard_gate = hard_gate.unsqueeze(1)
         level_idx = level.unsqueeze(0).unsqueeze(0)
         level_idx = level_idx.expand(batch_size, num_heads, seq_len, seq_len)
-        hard_gate = torch.gather(
+        hard_gate_matrix = torch.gather(
             hard_gate.expand(batch_size, num_heads, mlconv_radius + 1, seq_len),
             dim=2,
             index=level_idx
         )
-        hard_gate = hard_gate.masked_fill(
+        hard_gate_matrix = hard_gate_matrix.masked_fill(
             diag_mask.unsqueeze(0).unsqueeze(0),
             1.0
         )
-        if is_infer:
-            attn_matrix = attn_matrix.masked_fill((hard_gate == 0), float("-inf"))
-        else:
-            log_gate = torch.log(hard_gate.clamp(min=1e-12))
-            attn_matrix = attn_matrix + log_gate
-        
         future_mask = rel < 0
-        attn_matrix = attn_matrix.masked_fill(future_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
-    
+        valid_mask = ~future_mask
+        valid_mask = valid_mask.unsqueeze(0).unsqueeze(0)
+
     else:
-        hard_gate = hard_gate[:, None, None, :].expand(
-            batch_size, 1, seq_len, seq_len
+        hard_gate_matrix = hard_gate[:, None, None, :].expand(
+            batch_size, num_heads, seq_len, seq_len
         )
-        hard_gate = hard_gate.masked_fill(
+        hard_gate_matrix = hard_gate_matrix.masked_fill(
             diag_mask.unsqueeze(0).unsqueeze(0),
             1.0
         )
-        if is_infer:
-            attn_matrix = attn_matrix.masked_fill((hard_gate == 0), float("-inf"))
-        else:
-            log_gate = torch.log(hard_gate.clamp(min=1e-12))
-            attn_matrix = attn_matrix + log_gate
-        
-        pad_mask = idx[None, :] >= lengths[:, None]
-        attn_matrix = attn_matrix.masked_fill(pad_mask[:, None, None, :], float("-inf"))
 
-    return attn_matrix
+        pad_mask = idx[None, :] < lengths[:, None]
+        valid_mask = pad_mask[:, None, None, :]
+        valid_mask = valid_mask.expand(batch_size, num_heads, seq_len, seq_len)
 
+    return hard_gate_matrix, valid_mask
+
+def _gated_softmax(
+    attn_matrix: torch.Tensor, 
+    gate: torch.Tensor, 
+    valid_mask: torch.Tensor | None = None,
+    eps: float = 1e-12
+):
+    if valid_mask is not None:
+        attn_matrix = attn_matrix.masked_fill(~valid_mask, float("-inf"))
+    max_val = attn_matrix.max(dim=-1, keepdim=True).values
+    exp_attn_matrix = torch.exp(attn_matrix - max_val)
+    numerator = exp_attn_matrix * gate
+    denom = numerator.sum(dim=-1, keepdim=True)
+    attn_weights = numerator / (denom + eps)
+    return attn_weights
 
 class SelectiveMHA(nn.Module):
     def __init__(self, dim, head_dim):
@@ -129,9 +134,12 @@ class SelectiveMHA(nn.Module):
 
         scale = self.head_dim ** 0.5
         attn_matrix = (q_rot @ k_rot.transpose(-2, -1)) / scale
-        attn_matrix = build_attn_matrix(attn_matrix, hard_gate, lengths, is_infer)
-        
-        attn_weights = F.softmax(attn_matrix, dim=-1)
+        hard_gate_matrix, valid_mask = _build_gate_matrix(
+            hard_gate=hard_gate,
+            lengths=lengths,
+            num_heads=self.num_heads,
+        )
+        attn_weights = _gated_softmax(attn_matrix, hard_gate_matrix, valid_mask)
 
         out = attn_weights @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
@@ -180,7 +188,7 @@ class SelectiveMHA(nn.Module):
 
         scale = self.head_dim ** 0.5
         attn_matrix = (q_rot.unsqueeze(2) @ cache.k_rot[:, :, :cache.write_idx, :].transpose(-2, -1)) / scale
-        valid_mask = cache.valid_mask[:, :cache.write_idx]
+        valid_mask = cache.valid_mask[:, :cache.write_idx].clone()
         valid_mask[:, -1] = True
         attn_matrix = attn_matrix.masked_fill(
             valid_mask[:, None, None, :] == 0,
