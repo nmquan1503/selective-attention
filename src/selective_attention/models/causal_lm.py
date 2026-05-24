@@ -66,7 +66,7 @@ class CausalLM(nn.Module):
         is_infer = cache is not None
 
         hidden_states = self.embedding(input_ids)
-        gates = None
+        gates = []
         
         for layer_idx, layer in enumerate(self.layers):
             layer_output = layer(
@@ -77,15 +77,7 @@ class CausalLM(nn.Module):
             )
             if not is_infer:
                 hidden_states, _, gate = layer_output
-                if gates is None:
-                    batch_size, mlconv_radius_p1, seq_len = gate.shape
-                    gates = gate.new_empty(
-                        batch_size,
-                        len(self.layers),
-                        mlconv_radius_p1,
-                        seq_len
-                    )
-                gates[:, layer_idx] = gate
+                gates.append(gate)
             else:
                 hidden_states = layer_output[0]
         
