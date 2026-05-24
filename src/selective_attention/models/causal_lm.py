@@ -93,7 +93,7 @@ class CausalLM(nn.Module):
         logits = self.lm_head(hidden_states)
         
         if not is_infer:
-            return logits, torch.stack(gates, dim=1)
+            return logits, gates
         
         return logits
 
