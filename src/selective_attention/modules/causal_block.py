@@ -78,13 +78,18 @@ class CausalBlock(nn.Module):
             lengths=lengths, 
             cache=cache.mlconv_cache if cache is not None else None
         ).squeeze(-1))
-        hidden_states = self.mha(
+        mha_output = self.mha(
             hidden_states=hidden_states, 
             gate=gate, 
             lengths=lengths,
             gate_threshold=attn_gate_threshold,
             cache=cache.attn_cache if cache is not None else None
         )
+        if not is_infer:
+            hidden_states, attn_weight = mha_output
+        else:
+            hidden_states = mha_output
+
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
@@ -93,7 +98,7 @@ class CausalBlock(nn.Module):
         hidden_states = res + self.dropout(hidden_states)
         
         if not is_infer:
-            return hidden_states, last_ssm_hiddens, gate
+            return hidden_states, last_ssm_hiddens, gate, attn_weight
     
         return hidden_states, last_ssm_hiddens
 

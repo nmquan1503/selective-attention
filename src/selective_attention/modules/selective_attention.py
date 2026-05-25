@@ -74,8 +74,8 @@ def _gated_softmax(
     exp_attn_matrix = torch.exp(attn_matrix - max_val)
     numerator = exp_attn_matrix * gate
     denom = numerator.sum(dim=-1, keepdim=True)
-    attn_weights = numerator / (denom + eps)
-    return attn_weights
+    attn_weight = numerator / (denom + eps)
+    return attn_weight
 
 class SelectiveMHA(nn.Module):
     def __init__(self, dim, head_dim):
@@ -139,15 +139,18 @@ class SelectiveMHA(nn.Module):
             lengths=lengths,
             num_heads=self.num_heads,
         )
-        attn_weights = _gated_softmax(attn_matrix, hard_gate_matrix, valid_mask)
+        attn_weight = _gated_softmax(attn_matrix, hard_gate_matrix, valid_mask)
 
-        out = attn_weights @ v
+        out = attn_weight @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
         hidden_states = self.out_proj(out)
         
         if is_infer and is_causal:
             cache.build(k_rot, v, hard_gate, lengths)
         
+        if not is_infer:
+            return hidden_states, attn_weight
+
         return hidden_states
 
     def step(
@@ -195,8 +198,8 @@ class SelectiveMHA(nn.Module):
             float("-inf")
         )
 
-        attn_matrix = F.softmax(attn_matrix, dim=-1)
-        out = attn_matrix @ cache.v[:, :, :cache.write_idx, :]
+        attn_weight = F.softmax(attn_matrix, dim=-1)
+        out = attn_weight @ cache.v[:, :, :cache.write_idx, :]
         out = out.transpose(1, 2).contiguous().view(batch_size, self.dim)
 
         return self.out_proj(out)
