@@ -66,8 +66,9 @@ class CausalLM(nn.Module):
         is_infer = cache is not None
 
         hidden_states = self.embedding(input_ids)
-        gates = []
+        hard_gates = []
         attn_weights = []
+        valid_masks = []
         
         for layer_idx, layer in enumerate(self.layers):
             layer_output = layer(
@@ -77,9 +78,10 @@ class CausalLM(nn.Module):
                 cache=cache[layer_idx] if is_infer else None
             )
             if not is_infer:
-                hidden_states, _, gate, attn_weight = layer_output
-                gates.append(gate)
+                hidden_states, _, hard_gate_matrix, attn_weight, valid_matrix = layer_output
+                hard_gates.append(hard_gate_matrix)
                 attn_weights.append(attn_weight)
+                valid_masks.append(valid_matrix)
             else:
                 hidden_states = layer_output[0]
         
@@ -87,7 +89,7 @@ class CausalLM(nn.Module):
         logits = self.lm_head(hidden_states)
         
         if not is_infer:
-            return logits, gates, attn_weights
+            return logits, hard_gates, attn_weights, valid_masks
         
         return logits
 

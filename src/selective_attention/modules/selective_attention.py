@@ -149,7 +149,7 @@ class SelectiveMHA(nn.Module):
             cache.build(k_rot, v, hard_gate, lengths)
         
         if not is_infer:
-            return hidden_states, attn_weight
+            return hidden_states, hard_gate_matrix, attn_weight, valid_mask
 
         return hidden_states
 

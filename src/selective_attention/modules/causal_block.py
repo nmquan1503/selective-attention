@@ -86,7 +86,7 @@ class CausalBlock(nn.Module):
             cache=cache.attn_cache if cache is not None else None
         )
         if not is_infer:
-            hidden_states, attn_weight = mha_output
+            hidden_states, hard_gate_matrix, attn_weight, valid_mask = mha_output
         else:
             hidden_states = mha_output
 
@@ -98,7 +98,7 @@ class CausalBlock(nn.Module):
         hidden_states = res + self.dropout(hidden_states)
         
         if not is_infer:
-            return hidden_states, last_ssm_hiddens, gate, attn_weight
+            return hidden_states, last_ssm_hiddens, hard_gate_matrix, attn_weight, valid_mask
     
         return hidden_states, last_ssm_hiddens
 
