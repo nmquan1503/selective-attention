@@ -39,7 +39,6 @@ class CausalBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.gate_conv = MultiLevelConv1D(model_dim, 1, mlconv_radius)
         self.mha = SelectiveMHA(model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
@@ -73,33 +72,18 @@ class CausalBlock(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv(
-            x=hidden_states, 
-            lengths=lengths, 
-            cache=cache.mlconv_cache if cache is not None else None
-        ).squeeze(-1))
-        mha_output = self.mha(
+        hidden_states = self.mha(
             hidden_states=hidden_states, 
-            gate=gate, 
             lengths=lengths,
-            gate_threshold=attn_gate_threshold,
             cache=cache.attn_cache if cache is not None else None
         )
-        if not is_infer:
-            hidden_states, hard_gate_matrix, attn_weight, valid_mask = mha_output
-        else:
-            hidden_states = mha_output
-
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
         hidden_states = self.norm3(hidden_states)
         hidden_states = self.ffn(hidden_states)
         hidden_states = res + self.dropout(hidden_states)
-        
-        if not is_infer:
-            return hidden_states, last_ssm_hiddens, hard_gate_matrix, attn_weight, valid_mask
-    
+
         return hidden_states, last_ssm_hiddens
 
     def step(self, hidden_states: torch.Tensor, cache: CausalBlockCache, state: InferenceState, gen_cfg: GenerationConfig):

@@ -5,77 +5,37 @@ import torch.nn.functional as F
 from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig
 from .rope import RoPE
 
-def _build_gate_matrix(
-    hard_gate: torch.Tensor, 
-    lengths: torch.Tensor,
-    num_heads: int,
+def _build_attn_matrix(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    gate: torch.Tensor,
 ):
     """
     Args:
-        attn_matrix: (batch_size, num_heads, seq_len, seq_len)
-        hard_gate: (batch_size, mlconv_radius + 1, seq_len) | (batch_size, seq_len)
-
+        q, k: (batch_size, num_heads, seq_len, head_dim)
+        gate: (batch_size, seq_len)
+        lengths: (batch_size, seq_len)
+    
     Returns:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
     """
-    batch_size = hard_gate.shape[0]
-    seq_len = hard_gate.shape[-1]
-    device = hard_gate.device
-    is_causal = hard_gate.ndim == 3
+    batch_size, _, seq_len, head_dim = q.shape
+    device = q.device
 
-    idx = torch.arange(seq_len, device=device)
-    rel = idx[:, None] - idx[None, :]
-    diag_mask = (rel == 0)
-    
-    if is_causal:
-        mlconv_radius = hard_gate.shape[1] - 1
-        dist = rel.clamp(min=0, max=mlconv_radius)
-        level = mlconv_radius - dist
-        hard_gate = hard_gate.unsqueeze(1)
-        level_idx = level.unsqueeze(0).unsqueeze(0)
-        level_idx = level_idx.expand(batch_size, num_heads, seq_len, seq_len)
-        hard_gate_matrix = torch.gather(
-            hard_gate.expand(batch_size, num_heads, mlconv_radius + 1, seq_len),
-            dim=2,
-            index=level_idx
-        )
-        hard_gate_matrix = hard_gate_matrix.masked_fill(
-            diag_mask.unsqueeze(0).unsqueeze(0),
-            1.0
-        )
-        future_mask = rel < 0
-        valid_mask = ~future_mask
-        valid_mask = valid_mask.unsqueeze(0).unsqueeze(0)
+    attn_matrix = torch.matmul(q, k.transpose(-2, -1)) * (head_dim ** -0.5)
+    causal_mask = torch.triu(
+        torch.ones(seq_len, seq_len, dtype=torch.bool, device=device),
+        diagonal=1
+    )
 
-    else:
-        hard_gate_matrix = hard_gate[:, None, None, :].expand(
-            batch_size, num_heads, seq_len, seq_len
-        )
-        hard_gate_matrix = hard_gate_matrix.masked_fill(
-            diag_mask.unsqueeze(0).unsqueeze(0),
-            1.0
-        )
+    attn_matrix = attn_matrix.masked_fill(causal_mask, float("-inf"))
+    log_gate = torch.log(gate.clamp_min(1e-12))
+    attn_matrix = attn_matrix + log_gate[:, None, None, :]
 
-        pad_mask = idx[None, :] < lengths[:, None]
-        valid_mask = pad_mask[:, None, None, :]
-        valid_mask = valid_mask.expand(batch_size, num_heads, seq_len, seq_len)
+    diag_index = torch.arange(seq_len, device=device)
+    attn_matrix[:, :, diag_index, diag_index] = attn_matrix[:, :, diag_index, diag_index] - log_gate[:, None, :]
 
-    return hard_gate_matrix, valid_mask
-
-def _gated_softmax(
-    attn_matrix: torch.Tensor, 
-    gate: torch.Tensor, 
-    valid_mask: torch.Tensor | None = None,
-    eps: float = 1e-12
-):
-    if valid_mask is not None:
-        attn_matrix = attn_matrix.masked_fill(~valid_mask, float("-inf"))
-    max_val = attn_matrix.max(dim=-1, keepdim=True).values
-    exp_attn_matrix = torch.exp(attn_matrix - max_val)
-    numerator = exp_attn_matrix * gate
-    denom = numerator.sum(dim=-1, keepdim=True)
-    attn_weight = numerator / (denom + eps)
-    return attn_weight
+    return attn_matrix
 
 class SelectiveMHA(nn.Module):
     def __init__(self, dim, head_dim):
@@ -85,8 +45,8 @@ class SelectiveMHA(nn.Module):
         self.dim = dim
         self.num_heads = dim // head_dim
         self.head_dim = head_dim
-        assert self.head_dim % 2 == 0, "head_dim must be even for RoPE"
 
+        self.gate_proj = nn.Linear(dim, dim + 1)
         self.rope = RoPE(self.head_dim)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
@@ -96,9 +56,7 @@ class SelectiveMHA(nn.Module):
     def forward(
         self, 
         hidden_states: torch.Tensor, 
-        gate: torch.Tensor,
         lengths: torch.Tensor | None = None, 
-        gate_threshold: float | None = None,
         cache: SelectiveAttnCache | None = None
     ):
         """
@@ -113,13 +71,15 @@ class SelectiveMHA(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
         is_infer = cache is not None
-        is_causal = gate.ndim == 3
+        is_causal = True
 
-        if is_infer:
-            hard_gate = (gate > gate_threshold).float()
-        else:
-            hard_gate = (gate > 0.5).float()
-            hard_gate = hard_gate.detach() + gate - gate.detach()
+        gate = torch.sigmoid(self.gate_proj(hidden_states))
+        select_gate, out_gate = torch.split(gate, [1, self.dim], dim=-1)
+        select_gate = select_gate.squeeze(-1)
+
+        hard_select_gate = (select_gate > 0.5).float()
+        if not is_infer:
+            hard_select_gate = hard_select_gate.detach() + select_gate - select_gate.detach()
  
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -132,25 +92,16 @@ class SelectiveMHA(nn.Module):
         positions = torch.arange(seq_len, device=device)
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
 
-        scale = self.head_dim ** 0.5
-        attn_matrix = (q_rot @ k_rot.transpose(-2, -1)) / scale
-        hard_gate_matrix, valid_mask = _build_gate_matrix(
-            hard_gate=hard_gate,
-            lengths=lengths,
-            num_heads=self.num_heads,
-        )
-        attn_weight = _gated_softmax(attn_matrix, hard_gate_matrix, valid_mask)
+        attn_matrix = _build_attn_matrix(q_rot, k_rot, hard_select_gate)
+        attn_weight = F.softmax(attn_matrix, dim=-1)
 
         out = attn_weight @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
-        hidden_states = self.out_proj(out)
+        hidden_states = self.out_proj(out * out_gate)
         
-        if is_infer and is_causal:
-            cache.build(k_rot, v, hard_gate, lengths)
+        # if is_infer and is_causal:
+        #     cache.build(k_rot, v, hard_gate, lengths)
         
-        if not is_infer:
-            return hidden_states, hard_gate_matrix, attn_weight, valid_mask
-
         return hidden_states
 
     def step(

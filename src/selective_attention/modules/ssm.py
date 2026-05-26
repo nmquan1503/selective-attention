@@ -141,7 +141,7 @@ class SSM(nn.Module):
         hidden_states = hidden_states.view(batch_size, seq_len, -1)
         hidden_states = hidden_states + self.D * ssm_residual
 
-        hidden_states = hidden_states * F.silu(gate_logits)
+        hidden_states = hidden_states * torch.sigmoid(gate_logits)
         hidden_states = self.out_proj(hidden_states)
 
         return hidden_states, last_ssm_hiddens
