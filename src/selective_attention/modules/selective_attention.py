@@ -8,13 +8,10 @@ from .rope import RoPE
 def _build_attn_matrix(
     q: torch.Tensor,
     k: torch.Tensor,
-    gate: torch.Tensor,
 ):
     """
     Args:
         q, k: (batch_size, num_heads, seq_len, head_dim)
-        gate: (batch_size, seq_len)
-        lengths: (batch_size, seq_len)
     
     Returns:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
@@ -27,15 +24,29 @@ def _build_attn_matrix(
         torch.ones(seq_len, seq_len, dtype=torch.bool, device=device),
         diagonal=1
     )
-
     attn_matrix = attn_matrix.masked_fill(causal_mask, float("-inf"))
-    log_gate = torch.log(gate.clamp_min(1e-12))
-    attn_matrix = attn_matrix + log_gate[:, None, None, :]
-
-    diag_index = torch.arange(seq_len, device=device)
-    attn_matrix[:, :, diag_index, diag_index] = attn_matrix[:, :, diag_index, diag_index] - log_gate[:, None, :]
 
     return attn_matrix
+
+def _gated_softmax(
+    attn_matrix: torch.Tensor,
+    gate: torch.Tensor,
+    eps: float = 1e-12
+):
+    """
+    Args:
+        attn_matrix: (batch_size, num_heads, seq_len, seq_len)
+        gate: (batch_size, seq_len)
+    """
+    gate = gate[:, None, None, :]
+    max_val = attn_matrix.max(dim=-1, keepdim=True).values
+    exp_attn = torch.exp(attn_matrix - max_val)
+    numerator = exp_attn * gate
+    diag_indices = torch.arange(attn_matrix.size(-1), device=attn_matrix.device)
+    numerator[..., diag_indices, diag_indices] = exp_attn[..., diag_indices, diag_indices]
+    denom = numerator.sum(dim=-1, keepdim=True)
+    attn_weight = numerator / (denom + eps)
+    return attn_weight
 
 class SelectiveMHA(nn.Module):
     def __init__(self, dim, head_dim):
@@ -65,7 +76,6 @@ class SelectiveMHA(nn.Module):
         Args:
             hidden_states: (batch_size, seq_len, dim)
             lengths: (batch_size,)
-            gate: (batch_size, mlconv_radius + 1, seq_len) | (batch_size, seq_len)
         
         Returns:
             hidden_states: (batch_size, seq_len, dim)
@@ -94,8 +104,8 @@ class SelectiveMHA(nn.Module):
         positions = torch.arange(seq_len, device=device)
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
 
-        attn_matrix = _build_attn_matrix(q_rot, k_rot, hard_select_gate)
-        attn_weight = F.softmax(attn_matrix, dim=-1)
+        attn_matrix = _build_attn_matrix(q_rot, k_rot)
+        attn_weight = _gated_softmax(attn_matrix, hard_select_gate)
 
         out = attn_weight @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
