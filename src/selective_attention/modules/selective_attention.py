@@ -53,6 +53,8 @@ class SelectiveMHA(nn.Module):
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
 
+        nn.init.constant(self.gate_proj.bias, 2.0)
+
     def forward(
         self, 
         hidden_states: torch.Tensor, 

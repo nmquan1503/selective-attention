@@ -39,6 +39,15 @@ class CausalBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
+        self.causal_conv = nn.Conv1d(
+            in_channels=model_dim,
+            out_channels=model_dim,
+            kernel_size=4,
+            groups=model_dim,
+            padding=3,
+            bias=False
+        )
+        self.gate_proj = nn.Linear(model_dim, 1)
         self.mha = SelectiveMHA(model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
@@ -60,6 +69,7 @@ class CausalBlock(nn.Module):
             last_ssm_hiddens: (batch_size, inner_dim, state_dim)
         """
         is_infer = cache is not None
+        seq_len = hidden_states[1]
 
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
@@ -69,6 +79,11 @@ class CausalBlock(nn.Module):
             cache=cache.ssm_cache if cache is not None else None
         )
         hidden_states = res + self.dropout(hidden_states)
+
+        hidden_states = self.causal_conv(hidden_states.transpose(1, 2)).transpose(1, 2)
+        hidden_states = hidden_states[:, :seq_len]
+        gate = torch.sigmoid(self.gate_proj(hidden_states).squeeze(-1))
+        hidden_states = hidden_states * gate
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
