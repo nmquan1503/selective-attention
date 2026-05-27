@@ -82,7 +82,7 @@ class CausalBlock(nn.Module):
 
         hidden_states = self.causal_conv(hidden_states.transpose(1, 2)).transpose(1, 2)
         hidden_states = hidden_states[:, :seq_len]
-        gate = torch.sigmoid(self.gate_proj(hidden_states).squeeze(-1))
+        gate = torch.sigmoid(self.gate_proj(hidden_states))
         hidden_states = hidden_states * gate
 
         res = hidden_states
