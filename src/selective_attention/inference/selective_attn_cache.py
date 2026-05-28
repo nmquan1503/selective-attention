@@ -48,7 +48,29 @@ class SelectiveAttnCache:
         self.write_idx = 0
         self.valid_mask = None  # (batch_size, compressed_len)
 
-    def build(
+    def build_conv_ctx(
+        self,
+        x: torch.Tensor,
+        lengths: torch.Tensor,
+        cache_size: int,
+    ):
+        """
+        Args:
+            x: (batch_size, dim, seq_len)
+            lengths: (batch_size,)
+        """
+        batch_size, dim, seq_len = x.shape
+        device = x.device
+
+        cache_idx = torch.arange(cache_size, device=device)[None, None, :]
+        src_idx = lengths[:, None, None] - cache_size + cache_idx
+        valid = (src_idx >= 0) * (src_idx < lengths[:, None, None])
+        src_idx = src_idx.clamp(0, seq_len - 1)
+        src_idx = src_idx.expand(batch_size, dim, cache_size)
+        self.conv_ctx = torch.gather(x, dim=2, index=src_idx) * valid.expand(batch_size, dim, cache_size)
+
+
+    def build_kv(
         self,
         k_rot: torch.Tensor,
         v: torch.Tensor,
@@ -59,60 +81,40 @@ class SelectiveAttnCache:
         Args:
             k_rot: (batch_size, num_heads, seq_len, head_dim)
             v: (batch_size, num_heads, seq_len, head_dim)
-            hard_gate: (batch_size, mlconv_radius + 1, seq_len)
+            hard_gate: (batch_size, seq_len)
             lengths: (batch_size)
         """
-        batch_size, _, seq_len = hard_gate.shape
-        mlconv_radius = hard_gate.size(1) - 1
+        batch_size, seq_len = hard_gate.shape
         device = k_rot.device
 
         self.k_rot = k_rot
         self.v = v
         
         pos = torch.arange(seq_len, device=device).unsqueeze(0)
-        level_idx = torch.clamp(
-            pos - (lengths.unsqueeze(1) - 1 - mlconv_radius),
-            min=0,
-            max=mlconv_radius
-        )
-        hard_gate = hard_gate[
-            torch.arange(batch_size, device=device).unsqueeze(1),
-            level_idx,
-            pos
-        ]
         self.valid_mask = pos < lengths.unsqueeze(1)
-        hard_gate, _ = _right_align(
-            hard_gate[:, None, :, None], self.valid_mask, buffer_size=0
-        )
-        hard_gate = hard_gate.squeeze(-1).squeeze(1)
-        self.k_rot, _ = _right_align(
-            self.k_rot, self.valid_mask, buffer_size=0
-        )
-        self.v, self.valid_mask = _right_align(
-            self.v, self.valid_mask, buffer_size=0
-        )
         self.valid_mask = self.valid_mask & (hard_gate == 1)
-        self.write_idx = self.k_rot.shape[2]
- 
-    def reset(self, mlconv_radius: int, buffer_size: int):
-        last = self.valid_mask[:, -mlconv_radius:].clone()
-        self.valid_mask[:, -mlconv_radius:] = True
+
+    def reset(self, buffer_size: int):
         self.k_rot, _ = _right_align(
             self.k_rot,
             self.valid_mask,
             buffer_size=buffer_size
         )
-
         self.v, self.valid_mask = _right_align(
             self.v,
             self.valid_mask,
             buffer_size=buffer_size
         )
-        self.valid_mask[:, -mlconv_radius-buffer_size:-buffer_size] = last
-
         self.write_idx = self.k_rot.shape[2] - buffer_size
 
-    def update(
+    def update_conv_ctx(self, x: torch.Tensor):
+        """
+        Args: (batch_size, model_dim)
+        """
+        self.conv_ctx = torch.roll(self.conv_ctx, shifts=-1, dims=-1)
+        self.conv_ctx[:, :, -1] = x
+    
+    def update_kv(
         self,
         k_rot: torch.Tensor,
         v: torch.Tensor,
@@ -122,11 +124,9 @@ class SelectiveAttnCache:
         Args:
             k_rot: (batch_size, self.num_heads, self.head_dim)
             v: (batch_size, self.num_heads, self.head_dim)
-            hard_gate: (batch_size, mlconv_radius + 1)
+            hard_gate: (batch_size,)
         """
-        mlconv_radius = hard_gate.size(1) - 1
-
-        self.valid_mask[:, self.write_idx-mlconv_radius:self.write_idx + 1] = (hard_gate == 1)
+        self.valid_mask[:, self.write_idx] = (hard_gate == 1)
         self.k_rot[:, :, self.write_idx, :] = k_rot
         self.v[:, :, self.write_idx, :] = v
         self.write_idx += 1

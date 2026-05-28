@@ -14,7 +14,7 @@ class CausalLMConfig:
     ssm_conv_kernel_size: int = 4
     ssm_num_groups: int = 1
     ssm_chunk_size: int = 256
-    mlconv_radius: int = 2
+    attn_conv_kernel_size: int = 2
     num_layers: int = 4
     dropout_rate: float = 0.15
     device: str | None = "cuda"
@@ -37,7 +37,7 @@ class CausalLM(nn.Module):
                 ssm_conv_kernel_size=cfg.ssm_conv_kernel_size,
                 ssm_num_groups=cfg.ssm_num_groups,
                 ssm_chunk_size=cfg.ssm_chunk_size,
-                mlconv_radius=cfg.mlconv_radius,
+                attn_conv_kernel_size=cfg.attn_conv_kernel_size,
                 dropout_rate=cfg.dropout_rate,
                 device=cfg.device
             )
@@ -52,6 +52,7 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
+        attn_gate_threshold: float = 0.5,
         cache: list[CausalBlockCache] | None = None
     ):
         """
@@ -70,6 +71,7 @@ class CausalLM(nn.Module):
             hidden_states, _ = layer(
                 hidden_states=hidden_states, 
                 lengths=lengths,
+                attn_gate_threshold=attn_gate_threshold,
                 cache=cache[layer_idx] if is_infer else None
             )
         

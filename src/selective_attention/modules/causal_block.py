@@ -20,7 +20,7 @@ class CausalBlock(nn.Module):
         ssm_conv_kernel_size: int = 4,
         ssm_num_groups: int = 1,
         ssm_chunk_size: int = 256,
-        mlconv_radius: int = 2,
+        attn_conv_kernel_size: int = 4,
         dropout_rate: float = 0.15,
         device="cuda"
     ):
@@ -39,16 +39,7 @@ class CausalBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.causal_conv = nn.Conv1d(
-            in_channels=model_dim,
-            out_channels=model_dim,
-            kernel_size=4,
-            groups=model_dim,
-            padding=3,
-            bias=False
-        )
-        self.gate_proj = nn.Linear(model_dim, 1)
-        self.mha = SelectiveMHA(model_dim, head_dim)
+        self.mha = SelectiveMHA(model_dim, head_dim, attn_conv_kernel_size)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -56,7 +47,7 @@ class CausalBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float | None = None,
+        attn_gate_threshold: float | None = 0.5,
         cache: CausalBlockCache | None = None
     ):
         """
@@ -80,16 +71,12 @@ class CausalBlock(nn.Module):
         )
         hidden_states = res + self.dropout(hidden_states)
 
-        hidden_states = self.causal_conv(hidden_states.transpose(1, 2)).transpose(1, 2)
-        hidden_states = hidden_states[:, :seq_len]
-        gate = torch.sigmoid(self.gate_proj(hidden_states))
-        hidden_states = hidden_states * gate
-
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
         hidden_states = self.mha(
             hidden_states=hidden_states, 
             lengths=lengths,
+            attn_gate_threshold=attn_gate_threshold,
             cache=cache.attn_cache if cache is not None else None
         )
         hidden_states = res + self.dropout(hidden_states)
@@ -117,13 +104,8 @@ class CausalBlock(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv.step(
-            x=hidden_states, 
-            cache=cache.mlconv_cache
-        ).squeeze(-1))
         hidden_states = self.mha.step(
             hidden_states=hidden_states, 
-            gate=gate, 
             cache=cache.attn_cache, 
             state=state, 
             gen_cfg=gen_cfg
