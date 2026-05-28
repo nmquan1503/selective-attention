@@ -105,6 +105,7 @@ class SelectiveMHA(nn.Module):
         hidden_states = self.causal_conv(hidden_states)
         hidden_states = hidden_states.transpose(1, 2)
         hidden_states = hidden_states[:, :seq_len]
+        hidden_states = hidden_states * out_gate
 
         hard_select_gate = (select_gate > attn_gate_threshold).float()
         if not is_infer:
