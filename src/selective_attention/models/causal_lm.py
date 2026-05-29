@@ -51,7 +51,7 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float = 0.5,
+        attn_gate_threshold: float | None = None,
         cache: list[CausalBlockCache] | None = None
     ):
         """

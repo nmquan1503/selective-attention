@@ -46,7 +46,7 @@ class CausalBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float | None = 0.5,
+        attn_gate_threshold: float | None = None,
         cache: CausalBlockCache | None = None
     ):
         """
