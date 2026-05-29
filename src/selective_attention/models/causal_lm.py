@@ -37,7 +37,6 @@ class CausalLM(nn.Module):
                 ssm_conv_kernel_size=cfg.ssm_conv_kernel_size,
                 ssm_num_groups=cfg.ssm_num_groups,
                 ssm_chunk_size=cfg.ssm_chunk_size,
-                attn_conv_kernel_size=cfg.attn_conv_kernel_size,
                 dropout_rate=cfg.dropout_rate,
                 device=cfg.device
             )

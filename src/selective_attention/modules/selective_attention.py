@@ -36,50 +36,49 @@ def _gated_softmax(
     """
     Args:
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
-        gate: (batch_size, seq_len)
+        gate: (batch_size, num_heads, seq_len)
     """
-    gate = gate[:, None, None, :]
+    gate = gate.unsqueeze(2)
     max_val = attn_matrix.max(dim=-1, keepdim=True).values
     exp_attn = torch.exp(attn_matrix - max_val)
     numerator = exp_attn * gate
-    diag_indices = torch.arange(attn_matrix.size(-1), device=attn_matrix.device)
-    numerator[..., diag_indices, diag_indices] = exp_attn[..., diag_indices, diag_indices]
+
+    q_len = attn_matrix.size(-2)
+    k_len = attn_matrix.size(-1)
+
+    if q_len == k_len:
+        diag = torch.arange(q_len, device=attn_matrix.device)
+        numerator[..., diag, diag] = exp_attn[..., diag, diag]
+    elif q_len == 1:
+        numerator[..., -1] = exp_attn[..., -1]
+    else:
+        raise ValueError("Don't support")
+
     denom = numerator.sum(dim=-1, keepdim=True)
     attn_weight = numerator / (denom + eps)
     return attn_weight
 
 class SelectiveMHA(nn.Module):
-    def __init__(self, dim, head_dim, conv_kernel_size):
+    def __init__(self, dim, head_dim):
         super().__init__()
 
         assert dim % head_dim == 0
         self.dim = dim
         self.num_heads = dim // head_dim
         self.head_dim = head_dim
-        self.conv_kernel_size = conv_kernel_size
 
-        self.causal_conv = nn.Conv1d(
-            in_channels=dim,
-            out_channels=dim,
-            kernel_size=conv_kernel_size,
-            groups=self.num_heads,
-            padding=conv_kernel_size - 1,
-            bias=False
-        )
-        self.gate_proj = nn.Linear(dim, dim + 1)
+        self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.rope = RoPE(self.head_dim)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
 
-        nn.init.constant_(self.gate_proj.bias, 2.0)
-
     def forward(
         self, 
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float = 0.5,
+        attn_gate_threshold: float | None = None,
         cache: SelectiveAttnCache | None = None
     ):
         """
@@ -96,21 +95,11 @@ class SelectiveMHA(nn.Module):
         is_causal = True
 
         gate = torch.sigmoid(self.gate_proj(hidden_states))
-        select_gate, out_gate = torch.split(gate, [1, self.dim], dim=-1)
-        select_gate = select_gate.squeeze(-1)
-        
-        hidden_states = hidden_states.transpose(1, 2)
-        if is_infer:
-            cache.build_conv_ctx(hidden_states, lengths, self.conv_kernel_size)
-        hidden_states = self.causal_conv(hidden_states)
-        hidden_states = hidden_states.transpose(1, 2)
-        hidden_states = hidden_states[:, :seq_len]
-        hidden_states = hidden_states * out_gate
+        select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
+        select_gate = select_gate.transpose(1, 2).contiguous()
+        if attn_gate_threshold is not None:
+            select_gate[select_gate < attn_gate_threshold] = 0.0
 
-        hard_select_gate = (select_gate > attn_gate_threshold).float()
-        if not is_infer:
-            hard_select_gate = hard_select_gate.detach() + select_gate - select_gate.detach()
- 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
@@ -123,14 +112,14 @@ class SelectiveMHA(nn.Module):
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
 
         attn_matrix = _build_attn_matrix(q_rot, k_rot)
-        attn_weight = _gated_softmax(attn_matrix, hard_select_gate)
+        attn_weight = _gated_softmax(attn_matrix, select_gate)
 
         out = attn_weight @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
         hidden_states = self.out_proj(out * out_gate)
         
         if is_infer and is_causal:
-            cache.build_kv(k_rot, v, hard_select_gate, lengths)
+            cache.build_kv(k_rot, v, select_gate, lengths, attn_gate_threshold)
         
         return hidden_states
 
@@ -156,19 +145,9 @@ class SelectiveMHA(nn.Module):
             cache.reset(gen_cfg.cache_update_interval)
         
         gate = torch.sigmoid(self.gate_proj(hidden_states))
-        select_gate, out_gate = torch.split(gate, [1, self.dim], dim=-1)
-        select_gate = select_gate.squeeze(-1)
-        hard_select_gate = (select_gate > gen_cfg.attn_gate_threshold).float()
+        select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
+        select_gate[select_gate < gen_cfg.attn_gate_threshold] = 0.0
         
-        cache.update_conv_ctx(hidden_states)
-        hidden_states = cache.conv_ctx
-        hidden_states = F.conv1d(
-            hidden_states, 
-            weight=self.causal_conv.weight, 
-            bias=self.causal_conv.bias,
-            groups=self.causal_conv.groups
-        ).squeeze(-1)
-
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
@@ -179,21 +158,24 @@ class SelectiveMHA(nn.Module):
 
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
 
-        cache.update_kv(k_rot, v, hard_select_gate)
+        cache.update_kv(k_rot, v, select_gate, gen_cfg.attn_gate_threshold)
+
+        cached_k = cache.k_rot[:, :, :cache.write_idx, :] 
+        cached_v = cache.v[:, :, :cache.write_idx, :] 
+        cached_gate = cache.gate[:, :, :cache.write_idx]
+        valid_mask = cache.valid_mask[:, :, :cache.write_idx]
+        cur_valid = valid_mask[:, :, -1]
+        valid_mask[:, :, -1] = True
 
         scale = self.head_dim ** 0.5
-        attn_matrix = (q_rot.unsqueeze(2) @ cache.k_rot[:, :, :cache.write_idx, :].transpose(-2, -1)) / scale
-        valid_mask = cache.valid_mask[:, :cache.write_idx]
-        cur_valid = valid_mask[:, -1]
-        valid_mask[:, -1] = True
-        attn_matrix = attn_matrix.masked_fill(
-            valid_mask[:, None, None, :] == 0,
-            float("-inf")
-        )
-        valid_mask[:, -1] = cur_valid
+        attn_matrix = (q_rot.unsqueeze(2) @ cached_k.transpose(-2, -1)) / scale
+        attn_matrix = attn_matrix.masked_fill(~valid_mask[:, :, None, :], float("-inf"))
 
-        attn_weight = F.softmax(attn_matrix, dim=-1)
-        out = attn_weight @ cache.v[:, :, :cache.write_idx, :]
+        valid_mask[:, :, -1] = cur_valid
+
+        attn_weight = _gated_softmax(attn_matrix, cached_gate)
+
+        out = attn_weight @ cached_v
         out = out.transpose(1, 2).contiguous().view(batch_size, self.dim)
 
         return self.out_proj(out * out_gate)

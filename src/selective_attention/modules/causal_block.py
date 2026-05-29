@@ -20,7 +20,6 @@ class CausalBlock(nn.Module):
         ssm_conv_kernel_size: int = 4,
         ssm_num_groups: int = 1,
         ssm_chunk_size: int = 256,
-        attn_conv_kernel_size: int = 4,
         dropout_rate: float = 0.15,
         device="cuda"
     ):
@@ -39,7 +38,7 @@ class CausalBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.mha = SelectiveMHA(model_dim, head_dim, attn_conv_kernel_size)
+        self.mha = SelectiveMHA(model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 

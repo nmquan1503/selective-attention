@@ -8,45 +8,52 @@ def _right_align(
 ):
     """
     Args:
-        x: (batch_size, num_heads, seq_len, head_dim)
-        valid_mask: (batch_size, seq_len)
-    
+        x:          (batch_size, num_heads, seq_len, head_dim)
+        valid_mask: (batch_size, num_heads, seq_len)
+
     Returns:
-        x: (batch_size, num_heads, compressed_len + buffer_size, head_dim)
+        x:          (batch_size, num_heads, max_valid + buffer_size, head_dim)
+        valid_mask: (batch_size, num_heads, max_valid + buffer_size)
     """
     batch_size, num_heads, seq_len, head_dim = x.shape
     device = x.device
 
-    num_valid = valid_mask.sum(dim=1)
+    num_valid = valid_mask.sum(dim=-1)
     max_valid = num_valid.max().item()
-    rank = valid_mask.cumsum(dim=1) - 1
+    rank = valid_mask.cumsum(dim=-1) - 1
     shift = max_valid - num_valid
-    out = torch.empty(
-        batch_size, num_heads, max_valid + buffer_size, head_dim,
-        device=device, dtype=x.dtype
-    )
-    src_valid = x.permute(0, 2, 1, 3)[valid_mask]
-    batch_idx = torch.arange(batch_size, device=device)
-    batch_idx = batch_idx.repeat_interleave(num_valid)
-    dst_valid = rank[valid_mask] + shift.repeat_interleave(num_valid)
-    out[batch_idx, :, dst_valid, :] = src_valid
-    valid_mask = (
-        torch.arange(max_valid + buffer_size, device=device)
-        .unsqueeze(0) 
-        >= shift.unsqueeze(1)
-    ) & (
-        torch.arange(max_valid + buffer_size, device=device)
-        .unsqueeze(0)
-        < (shift + num_valid).unsqueeze(1)
-    )
-    return out, valid_mask
+    new_len = max_valid + buffer_size
+
+    out = torch.zeros(batch_size, num_heads, new_len, head_dim, device=device, dtype=x.dtype)
+
+    flat_bh = batch_size * num_heads
+    out_flat = out.view(flat_bh, new_len, head_dim)
+    x_flat = x.view(flat_bh, seq_len, head_dim)
+    valid_flat = valid_mask.view(flat_bh, seq_len)
+    dst_idx = rank + shift.unsqueeze(-1)
+    dst_flat = dst_idx.view(flat_bh, seq_len)
+
+    sel_idx = dst_flat[valid_flat]
+    bh_idx = torch.arange(flat_bh, device=device).unsqueeze(-1).expand(-1, seq_len)
+    bh_idx_sel = bh_idx[valid_flat]
+
+    out_flat[bh_idx_sel, sel_idx] = x_flat[valid_flat]
+
+    shift_flat = shift.view(flat_bh, 1)
+    num_valid_flat = num_valid.view(flat_bh, 1)
+    pos_idx = torch.arange(new_len, device=device)
+
+    new_valid_flat = (pos_idx >= shift_flat) & (pos_idx < shift_flat + num_valid_flat)
+    new_valid = new_valid_flat.view(batch_size, num_heads, new_len)
+
+    return out, new_valid
 
 class SelectiveAttnCache:
     def __init__(self):
         self.k_rot = None   # (batch_size, num_heads, compressed_len, head_dim)
         self.v = None   # (batch_size, num_heads, compressed_len, head_dim)
         self.write_idx = 0
-        self.valid_mask = None  # (batch_size, compressed_len)
+        self.valid_mask = None  # (batch_size, num_heads, compressed_len)
 
     def build_conv_ctx(
         self,
@@ -74,27 +81,36 @@ class SelectiveAttnCache:
         self,
         k_rot: torch.Tensor,
         v: torch.Tensor,
-        hard_gate: torch.Tensor,
-        lengths: torch.Tensor
+        gate: torch.Tensor,
+        lengths: torch.Tensor,
+        gate_threshold: float
     ):
         """
         Args:
             k_rot: (batch_size, num_heads, seq_len, head_dim)
             v: (batch_size, num_heads, seq_len, head_dim)
-            hard_gate: (batch_size, seq_len)
+            gate: (batch_size, num_heads, seq_len)
             lengths: (batch_size)
         """
-        batch_size, seq_len = hard_gate.shape
+        batch_size, _, seq_len = gate.shape
         device = k_rot.device
 
-        self.k_rot = k_rot
-        self.v = v
+        self.k_rot = k_rot.contiguous()
+        self.v = v.contiguous()
+        self.gate = gate.contiguous()
         
-        pos = torch.arange(seq_len, device=device).unsqueeze(0)
-        self.valid_mask = pos < lengths.unsqueeze(1)
-        self.valid_mask = self.valid_mask & (hard_gate == 1)
+        hard_gate = gate > gate_threshold
+        pos = torch.arange(seq_len, device=device).unsqueeze(0).unsqueeze(0)
+        self.valid_mask = pos < lengths.unsqueeze(1).unsqueeze(1)
+        self.valid_mask = self.valid_mask & hard_gate
 
     def reset(self, buffer_size: int):
+        self.gate, _ = _right_align(
+            self.gate.unsqueeze(-1),
+            self.valid_mask,
+            buffer_size=buffer_size
+        )
+        self.gate = self.gate.squeeze(-1)
         self.k_rot, _ = _right_align(
             self.k_rot,
             self.valid_mask,
@@ -118,15 +134,18 @@ class SelectiveAttnCache:
         self,
         k_rot: torch.Tensor,
         v: torch.Tensor,
-        hard_gate: torch.Tensor
+        gate: torch.Tensor,
+        gate_threshold: float
     ):
         """
         Args:
             k_rot: (batch_size, self.num_heads, self.head_dim)
             v: (batch_size, self.num_heads, self.head_dim)
-            hard_gate: (batch_size,)
+            hard_gate: (batch_size, num_heads)
         """
-        self.valid_mask[:, self.write_idx] = (hard_gate == 1)
+        hard_gate = gate > gate_threshold
+        self.valid_mask[:, :, self.write_idx] = hard_gate
         self.k_rot[:, :, self.write_idx, :] = k_rot
         self.v[:, :, self.write_idx, :] = v
+        self.gate[:, :, self.write_idx] = gate
         self.write_idx += 1
