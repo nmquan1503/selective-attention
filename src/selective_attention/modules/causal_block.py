@@ -14,6 +14,7 @@ from ..inference import CausalBlockCache, InferenceState, GenerationConfig
 class CausalBlock(nn.Module):
     def __init__(
         self,
+        layer_idx: int,
         model_dim: int = 512,
         head_dim: int = 64,
         ssm_state_dim: int = 128,
@@ -24,11 +25,13 @@ class CausalBlock(nn.Module):
         device="cuda"
     ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         self.norm1 = RMSNorm(model_dim)
         self.norm2 = RMSNorm(model_dim)
         self.norm3 = RMSNorm(model_dim)
         self.ssm = SSM(
+            layer_idx=layer_idx,
             model_dim=model_dim,
             state_dim=ssm_state_dim,
             conv_kernel_size=ssm_conv_kernel_size,
@@ -38,7 +41,7 @@ class CausalBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.mha = SelectiveMHA(model_dim, head_dim)
+        self.mha = SelectiveMHA(layer_idx, model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 

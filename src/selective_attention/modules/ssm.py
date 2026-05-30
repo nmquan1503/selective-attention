@@ -10,6 +10,7 @@ from ..inference import SSMCache
 class SSM(nn.Module):
     def __init__(
         self,
+        layer_idx: int,
         model_dim: int = 512,
         state_dim: int = 128,
         conv_kernel_size: int = 4,
@@ -25,6 +26,7 @@ class SSM(nn.Module):
         device="cuda"
     ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         self.model_dim = model_dim
         self.state_dim = state_dim
@@ -141,7 +143,7 @@ class SSM(nn.Module):
         hidden_states = hidden_states.view(batch_size, seq_len, -1)
         hidden_states = hidden_states + self.D * ssm_residual
 
-        hidden_states = hidden_states * F.silu(gate_logits)
+        hidden_states = hidden_states * F.sigmoid(gate_logits)
         hidden_states = self.out_proj(hidden_states)
 
         return hidden_states, last_ssm_hiddens
@@ -192,7 +194,7 @@ class SSM(nn.Module):
         hidden_states = hidden_states.view(batch_size, -1)
         hidden_states = hidden_states + self.D * ssm_residual
 
-        hidden_states = hidden_states * F.silu(gate_logits)
+        hidden_states = hidden_states * F.sigmoid(gate_logits)
         hidden_states = self.out_proj(hidden_states)
         
         return hidden_states

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
+from typing import List
 
 from ..modules import RMSNorm, CausalBlock
 from ..inference import InferenceState, CausalBlockCache, GenerationConfig
@@ -31,6 +32,7 @@ class CausalLM(nn.Module):
         self.embedding = nn.Embedding(cfg.vocab_size, cfg.model_dim)
         self.layers = nn.ModuleList([
             CausalBlock(
+                layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
                 ssm_state_dim=cfg.ssm_state_dim,
@@ -51,7 +53,7 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float | None = None,
+        attn_gate_thresholds: List[float] | None = None,
         cache: list[CausalBlockCache] | None = None
     ):
         """
@@ -70,7 +72,7 @@ class CausalLM(nn.Module):
             hidden_states, _ = layer(
                 hidden_states=hidden_states, 
                 lengths=lengths,
-                attn_gate_threshold=attn_gate_threshold,
+                attn_gate_threshold=attn_gate_thresholds[layer_idx],
                 cache=cache[layer_idx] if is_infer else None
             )
         
@@ -115,9 +117,11 @@ class CausalLM(nn.Module):
         cache = [CausalBlockCache() for _ in range(self.cfg.num_layers)]
         lengths = (input_ids != gen_cfg.pad_token_id).sum(dim=1)
         state = InferenceState(lengths)
+        if gen_cfg.attn_gate_thresholds is None:
+            gen_cfg.attn_gate_thresholds = [0.0] * self.cfg.num_layers
 
         last_indices = lengths - 1
-        logits = self.forward(input_ids, lengths, gen_cfg.attn_gate_threshold, cache)
+        logits = self.forward(input_ids, lengths, gen_cfg.attn_gate_thresholds, cache)
         logits = logits[torch.arange(batch_size, device=device), last_indices]
         
         seq_ids = torch.full(

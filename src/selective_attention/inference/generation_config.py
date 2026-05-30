@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import List
 
 @dataclass
 class GenerationConfig:
@@ -6,5 +7,5 @@ class GenerationConfig:
     eos_token_id: int
     pad_token_id: int
     max_new_tokens: int = 256
-    attn_gate_threshold: float = 0.01
+    attn_gate_thresholds: List[float] | None = None
     cache_update_interval: int = 100

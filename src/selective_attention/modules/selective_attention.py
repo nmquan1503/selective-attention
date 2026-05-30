@@ -59,8 +59,14 @@ def _gated_softmax(
     return attn_weight
 
 class SelectiveMHA(nn.Module):
-    def __init__(self, dim, head_dim):
+    def __init__(
+        self,
+        layer_idx: int, 
+        dim: int, 
+        head_dim: int
+    ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         assert dim % head_dim == 0
         self.dim = dim
@@ -140,13 +146,14 @@ class SelectiveMHA(nn.Module):
 
         batch_size, _ = hidden_states.shape
         device = hidden_states.device
+        attn_gate_threshold = gen_cfg.attn_gate_thresholds[self.layer_idx]
 
         if state.step % gen_cfg.cache_update_interval == 0:
             cache.reset(gen_cfg.cache_update_interval)
         
         gate = torch.sigmoid(self.gate_proj(hidden_states))
         select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
-        select_gate[select_gate < gen_cfg.attn_gate_threshold] = 0.0
+        select_gate[select_gate < attn_gate_threshold] = 0.0
         
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -158,7 +165,7 @@ class SelectiveMHA(nn.Module):
 
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
 
-        cache.update_kv(k_rot, v, select_gate, gen_cfg.attn_gate_threshold)
+        cache.update_kv(k_rot, v, select_gate, attn_gate_threshold)
 
         cached_k = cache.k_rot[:, :, :cache.write_idx, :] 
         cached_v = cache.v[:, :, :cache.write_idx, :] 
