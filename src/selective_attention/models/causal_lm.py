@@ -69,10 +69,15 @@ class CausalLM(nn.Module):
         hidden_states = self.embedding(input_ids)
         
         for layer_idx, layer in enumerate(self.layers):
+            attn_gate_threshold = (
+                attn_gate_thresholds[layer_idx] 
+                    if attn_gate_thresholds is not None 
+                    else None
+            )
             hidden_states, _ = layer(
                 hidden_states=hidden_states, 
                 lengths=lengths,
-                attn_gate_threshold=attn_gate_thresholds[layer_idx],
+                attn_gate_threshold=attn_gate_threshold,
                 cache=cache[layer_idx] if is_infer else None
             )
         
