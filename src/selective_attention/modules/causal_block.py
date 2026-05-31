@@ -5,7 +5,6 @@ import math
 from typing import Tuple
 
 from .ssm import SSM
-from .multilevel_conv1d import MultiLevelConv1D
 from .selective_attention import SelectiveMHA
 from .feed_forward import SwiGLU
 from .rms_norm import RMSNorm

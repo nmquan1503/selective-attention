@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 
 from .ssm import SSM
-from .multilevel_conv1d import MultiLevelConv1D
 from .selective_attention import SelectiveMHA
 from .cross_selective_attention import CrossSelectiveMHA
 from .feed_forward import SwiGLU
@@ -38,7 +37,6 @@ class CrossBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.gate_conv = MultiLevelConv1D(model_dim, 1, mlconv_radius)
         self.mha = SelectiveMHA(model_dim, head_dim)
         self.cross_mha = CrossSelectiveMHA(model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)

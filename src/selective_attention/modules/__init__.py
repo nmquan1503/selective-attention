@@ -1,7 +1,6 @@
 from .ssm import SSM
 from .selective_attention import SelectiveMHA
 from .cross_selective_attention import CrossSelectiveMHA
-from .multilevel_conv1d import MultiLevelConv1D
 from .rms_norm import RMSNorm
 from .feed_forward import SwiGLU
 from .causal_block import CausalBlock
@@ -12,7 +11,6 @@ __all__ = [
     "SSM",
     "SelectiveMHA",
     "CrossSelectiveMHA",
-    "MultiLevelConv1D",
     "RMSNorm",
     "SwiGLU",
     "CausalBlock",
