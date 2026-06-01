@@ -4,7 +4,8 @@ import math
 def _right_align(
     x: torch.Tensor,
     valid_mask: torch.Tensor,
-    buffer_size: int
+    buffer_size: int,
+    return_new_mask: bool = False
 ):
     """
     Args:
@@ -38,6 +39,9 @@ def _right_align(
     bh_idx_sel = bh_idx[valid_flat]
 
     out_flat[bh_idx_sel, sel_idx] = x_flat[valid_flat]
+
+    if not return_new_mask:
+        return out
 
     shift_flat = shift.view(flat_bh, 1)
     num_valid_flat = num_valid.view(flat_bh, 1)
@@ -104,16 +108,14 @@ class SelectiveAttnCache:
         self.valid_mask = pos < lengths.unsqueeze(1).unsqueeze(1)
         self.valid_mask = self.valid_mask & hard_gate
 
-        self.reset(0)
-
     def reset(self, buffer_size: int):
-        self.gate, _ = _right_align(
+        self.gate = _right_align(
             self.gate.unsqueeze(-1),
             self.valid_mask,
             buffer_size=buffer_size
         )
         self.gate = self.gate.squeeze(-1)
-        self.k_rot, _ = _right_align(
+        self.k_rot = _right_align(
             self.k_rot,
             self.valid_mask,
             buffer_size=buffer_size
@@ -121,7 +123,8 @@ class SelectiveAttnCache:
         self.v, self.valid_mask = _right_align(
             self.v,
             self.valid_mask,
-            buffer_size=buffer_size
+            buffer_size=buffer_size,
+            return_new_mask=True
         )
         self.write_idx = self.k_rot.shape[2] - buffer_size
 
@@ -145,7 +148,7 @@ class SelectiveAttnCache:
             v: (batch_size, self.num_heads, self.head_dim)
             hard_gate: (batch_size, num_heads)
         """
-        hard_gate = gate > gate_threshold
+        hard_gate = gate >= gate_threshold
         self.valid_mask[:, :, self.write_idx] = hard_gate
         self.k_rot[:, :, self.write_idx, :] = k_rot
         self.v[:, :, self.write_idx, :] = v
