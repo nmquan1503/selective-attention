@@ -112,7 +112,7 @@ class SSM(nn.Module):
             cache_size = self.conv_kernel_size
             cache.build_conv_ctx(hBC, lengths, cache_size)
         
-        hBC = F.silu(hBC, inplace=is_infer)
+        hBC = F.silu(hBC)
         hBC = self.conv(hBC).transpose(1, 2)
         hBC = hBC[:, :seq_len]
 
@@ -143,11 +143,10 @@ class SSM(nn.Module):
         hidden_states = hidden_states.view(batch_size, seq_len, -1)
         if is_infer:
             torch.addcmul(hidden_states, ssm_residual, self.D, value=1.0, out=hidden_states)
-            gate_logits.sigmoid_()
-            hidden_states.mul_(gate_logits)
+            hidden_states.mul_(torch.sigmoid(gate_logits))
         else:
             hidden_states = hidden_states + self.D * ssm_residual
-            hidden_states = hidden_states * F.sigmoid(gate_logits)
+            hidden_states = hidden_states * torch.sigmoid(gate_logits)
 
         hidden_states = self.out_proj(hidden_states)
 
@@ -198,8 +197,7 @@ class SSM(nn.Module):
 
         hidden_states = hidden_states.view(batch_size, -1)
         torch.addcmul(hidden_states, ssm_residual, self.D, value=1.0, out=hidden_states)
-        gate_logits.sigmoid_()
-        hidden_states.mul_(gate_logits)
+        hidden_states.mul_(torch.sigmoid(gate_logits))
         hidden_states = self.out_proj(hidden_states)
         
         return hidden_states
