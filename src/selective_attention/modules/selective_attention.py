@@ -11,6 +11,7 @@ def _build_attn_matrix(
     scale: float,
     is_infer: bool = False
 ):
+    is_infer = False
     """
     Args:
         q, k: (batch_size, num_heads, seq_len, head_dim)
@@ -49,6 +50,7 @@ def _gated_softmax(
         attn_matrix: (batch_size, num_heads, seq_len, seq_len)
         gate: (batch_size, num_heads, seq_len)
     """
+    is_infer = False
     seq_len = attn_matrix.shape[-1]
 
     gate = gate.unsqueeze(2)
