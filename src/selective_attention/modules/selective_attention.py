@@ -153,7 +153,6 @@ class SelectiveMHA(nn.Module):
         
         gate = torch.sigmoid(self.gate_proj(hidden_states))
         select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
-        select_gate[select_gate < attn_gate_threshold] = 0.0
         
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
