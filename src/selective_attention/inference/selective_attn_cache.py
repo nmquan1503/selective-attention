@@ -104,6 +104,8 @@ class SelectiveAttnCache:
         self.valid_mask = pos < lengths.unsqueeze(1).unsqueeze(1)
         self.valid_mask = self.valid_mask & hard_gate
 
+        self.reset(0)
+
     def reset(self, buffer_size: int):
         self.gate, _ = _right_align(
             self.gate.unsqueeze(-1),
