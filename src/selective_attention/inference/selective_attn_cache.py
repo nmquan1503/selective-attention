@@ -157,7 +157,7 @@ class SelectiveAttnCache:
                 buffer_size=buffer_size,
                 return_new_mask=True
             )
-            self.write_idx = self.k_rot.shape[2] - buffer_size
+        self.write_idx = self.k_rot.shape[2] - buffer_size
 
     def update_conv_ctx(self, x: torch.Tensor):
         """
