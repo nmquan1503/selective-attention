@@ -42,6 +42,7 @@ def _gated_softmax(
     attn_matrix: torch.Tensor,
     gate: torch.Tensor,
     eps: float = 1e-12,
+    mode: str = "seq",
     is_infer: bool = False
 ):
     """
@@ -56,8 +57,14 @@ def _gated_softmax(
     if is_infer:
         attn_matrix.sub_(max_val)
         attn_matrix.exp_()
-        attn_matrix[..., :-1].mul_(gate[..., :-1])
-        numerator = attn_matrix
+        if mode == "pos":
+            attn_matrix[..., :-1].mul_(gate[..., :-1])
+            numerator = attn_matrix
+        else:
+            numerator = attn_matrix * gate
+            diag = torch.arange(seq_len, device=attn_matrix.device)
+            numerator[..., diag, diag] = attn_matrix[..., diag, diag]
+
     else:
         exp_attn = torch.exp(attn_matrix - max_val)
         numerator = exp_attn * gate
@@ -134,7 +141,7 @@ class SelectiveMHA(nn.Module):
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
 
         attn_matrix = _build_attn_matrix(q_rot, k_rot, self.scale, is_infer)
-        attn_weight = _gated_softmax(attn_matrix, select_gate, is_infer=is_infer)
+        attn_weight = _gated_softmax(attn_matrix, select_gate, mode="seq", is_infer=is_infer)
 
         out = attn_weight @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
@@ -191,7 +198,7 @@ class SelectiveMHA(nn.Module):
         attn_matrix.mul_(self.scale)
         attn_matrix[:, :, :, :-1].masked_fill_(~valid_mask[:, :, None, :-1], float("-inf"))
 
-        attn_weight = _gated_softmax(attn_matrix, cached_gate, is_infer=True)
+        attn_weight = _gated_softmax(attn_matrix, cached_gate, mode="pos", is_infer=True)
 
         out = attn_weight @ cached_v
         out = out.transpose(1, 2).contiguous().view(batch_size, self.dim)
