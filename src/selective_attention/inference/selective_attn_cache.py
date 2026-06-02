@@ -1,5 +1,6 @@
 import torch
 import math
+import torch.nn.functional as F
 
 def _right_align(
     x: torch.Tensor,
@@ -51,6 +52,24 @@ def _right_align(
     new_valid = new_valid_flat.view(batch_size, num_heads, new_len)
 
     return out, new_valid
+
+def _pad_buffer(x: torch.Tensor, buffer_size: int):
+    """
+    Args:
+        x: (batch_size, num_heads, seq_len, head_dim)
+    """
+    if buffer_size <= 0:
+        return x
+    return F.pad(
+        x, 
+        pad=(
+            0, 0,
+            0, buffer_size,
+            0, 0
+        ),
+        mode="constant",
+        value=0
+    )
 
 class SelectiveAttnCache:
     def __init__(self):
@@ -108,25 +127,37 @@ class SelectiveAttnCache:
         self.valid_mask = pos < lengths.unsqueeze(1).unsqueeze(1)
         self.valid_mask = self.valid_mask & hard_gate
 
+        self.reset(0)
+
     def reset(self, buffer_size: int):
-        self.gate = _right_align(
-            self.gate.unsqueeze(-1),
-            self.valid_mask,
-            buffer_size=buffer_size
-        )
-        self.gate = self.gate.squeeze(-1)
-        self.k_rot = _right_align(
-            self.k_rot,
-            self.valid_mask,
-            buffer_size=buffer_size
-        )
-        self.v, self.valid_mask = _right_align(
-            self.v,
-            self.valid_mask,
-            buffer_size=buffer_size,
-            return_new_mask=True
-        )
-        self.write_idx = self.k_rot.shape[2] - buffer_size
+        num_valid = self.valid_mask.sum(dim=-1)
+        max_valid = num_valid.max().item()
+        if max_valid == self.valid_mask.shape[-1]:
+            self.gate = _pad_buffer(self.gate.unsqueeze(-1), buffer_size)
+            self.gate = self.gate.squeeze(-1)
+            self.k_rot = _pad_buffer(self.k_rot, buffer_size)
+            self.v = _pad_buffer(self.v, buffer_size)
+            self.valid_mask = _pad_buffer(self.valid_mask.unsqueeze(-1), buffer_size)
+            self.valid_mask.squeeze(-1)   
+        else:
+            self.gate = _right_align(
+                self.gate.unsqueeze(-1),
+                self.valid_mask,
+                buffer_size=buffer_size
+            )
+            self.gate = self.gate.squeeze(-1)
+            self.k_rot = _right_align(
+                self.k_rot,
+                self.valid_mask,
+                buffer_size=buffer_size
+            )
+            self.v, self.valid_mask = _right_align(
+                self.v,
+                self.valid_mask,
+                buffer_size=buffer_size,
+                return_new_mask=True
+            )
+            self.write_idx = self.k_rot.shape[2] - buffer_size
 
     def update_conv_ctx(self, x: torch.Tensor):
         """
