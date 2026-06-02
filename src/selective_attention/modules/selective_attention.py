@@ -57,13 +57,14 @@ def _gated_softmax(
     if is_infer:
         attn_matrix.sub_(max_val)
         attn_matrix.exp_()
+        exp_attn = attn_matrix
         if mode == "pos":
-            attn_matrix[..., :-1].mul_(gate[..., :-1])
-            numerator = attn_matrix
+            exp_attn[..., :-1].mul_(gate[..., :-1])
+            numerator = exp_attn
         else:
-            numerator = attn_matrix * gate
+            numerator = exp_attn * gate
             diag = torch.arange(seq_len, device=attn_matrix.device)
-            numerator[..., diag, diag] = attn_matrix[..., diag, diag]
+            numerator[..., diag, diag] = exp_attn[..., diag, diag]
 
     else:
         exp_attn = torch.exp(attn_matrix - max_val)
@@ -74,10 +75,11 @@ def _gated_softmax(
     denom = numerator.sum(dim=-1, keepdim=True)
     
     if is_infer:
-        attn_matrix.div_(denom + eps)
-        return attn_matrix
-
-    attn_weight = numerator / (denom + eps)
+        numerator.div_(denom + eps)
+        attn_weight = numerator
+    else:
+        attn_weight = numerator / (denom + eps)
+    
     return attn_weight
 
 class SelectiveMHA(nn.Module):
