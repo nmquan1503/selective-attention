@@ -103,7 +103,7 @@ class SelectiveAttnCache:
         self.v = v.contiguous()
         self.gate = gate.contiguous()
         
-        hard_gate = gate > gate_threshold
+        hard_gate = gate >= gate_threshold
         pos = torch.arange(seq_len, device=device).unsqueeze(0).unsqueeze(0)
         self.valid_mask = pos < lengths.unsqueeze(1).unsqueeze(1)
         self.valid_mask = self.valid_mask & hard_gate
@@ -148,7 +148,7 @@ class SelectiveAttnCache:
             v: (batch_size, self.num_heads, self.head_dim)
             hard_gate: (batch_size, num_heads)
         """
-        hard_gate = gate > gate_threshold
+        hard_gate = gate >= gate_threshold
         self.valid_mask[:, :, self.write_idx] = hard_gate
         self.k_rot[:, :, self.write_idx, :] = k_rot
         self.v[:, :, self.write_idx, :] = v
