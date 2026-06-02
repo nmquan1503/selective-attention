@@ -148,7 +148,7 @@ class SelectiveAttnCache:
             v: (batch_size, self.num_heads, self.head_dim)
             hard_gate: (batch_size, num_heads)
         """
-        hard_gate = gate >= gate_threshold
+        hard_gate = gate > gate_threshold
         self.valid_mask[:, :, self.write_idx] = hard_gate
         self.k_rot[:, :, self.write_idx, :] = k_rot
         self.v[:, :, self.write_idx, :] = v
