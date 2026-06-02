@@ -138,7 +138,7 @@ class SelectiveAttnCache:
             self.k_rot = _pad_buffer(self.k_rot, buffer_size)
             self.v = _pad_buffer(self.v, buffer_size)
             self.valid_mask = _pad_buffer(self.valid_mask.unsqueeze(-1), buffer_size)
-            self.valid_mask.squeeze(-1)   
+            self.valid_mask = self.valid_mask.squeeze(-1)   
         else:
             self.gate = _right_align(
                 self.gate.unsqueeze(-1),
