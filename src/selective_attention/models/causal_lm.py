@@ -49,6 +49,32 @@ class CausalLM(nn.Module):
         self.lm_head = nn.Linear(cfg.model_dim, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embedding.weight
     
+    def warmup(self, batch_size: int = 2):
+        device = self.cfg.device
+        seq_len = max(2, self.cfg.ssm_chunk_size)
+        input_ids = torch.randint(
+            0,self.cfg.vocab_size, 
+            (batch_size, seq_len), 
+            device=device, 
+            dtype=torch.long
+        )
+
+        if self.training:
+            logits = self.forward(input_ids=input_ids)
+            loss = logits.float().mean()
+            loss.backward()
+            self.zero_grad(set_to_none=True)
+
+        self.generate(input_ids, GenerationConfig(
+            bos_token_id=0,
+            eos_token_id=1,
+            pad_token_id=2,
+            max_new_tokens=1,
+            attn_gate_thresholds=[0.5] * self.cfg.num_layers,
+        ))
+
+        torch.cuda.synchronize(device)
+
     def forward(
         self,
         input_ids: torch.Tensor,

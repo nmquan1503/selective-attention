@@ -50,7 +50,7 @@ def ssu_forward(
         *(B.stride()),
         *(C.stride()),
         *(delta_raw.stride()),
-        *(delta_bias.stride() if delta_bias is not None  else (0)),
+        *(delta_bias.stride() if delta_bias is not None  else (0,)),
         *(h.stride()),
         *(y.stride()),
         HAS_DELTA_BIAS=delta_bias is not None,
