@@ -40,7 +40,7 @@ class CausalBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.mha = SelectiveMHA(layer_idx, model_dim, head_dim)
+        self.mha = SelectiveMHA(layer_idx, model_dim, head_dim, is_causal=True)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 
