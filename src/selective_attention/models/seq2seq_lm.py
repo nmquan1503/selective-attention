@@ -50,6 +50,7 @@ class Seq2SeqLM(nn.Module):
             model_dim=cfg.model_dim,
             state_dim=cfg.ssm_state_dim,
             conv_kernel_size=cfg.ssm_conv_kernel_size,
+            head_dim=cfg.head_dim,
             num_groups=cfg.ssm_num_groups,
             chunk_size=cfg.ssm_chunk_size,
             dropout_rate=cfg.dropout_rate,
