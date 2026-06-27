@@ -11,23 +11,25 @@ from ..inference import CrossBlockCache, InferenceState, GenerationConfig
 class CrossBlock(nn.Module):
     def __init__(
         self,
+        layer_idx: int,
         model_dim: int = 512,
         head_dim: int = 64,
         ssm_state_dim: int = 128,
         ssm_conv_kernel_size: int = 4,
         ssm_num_groups: int = 1,
         ssm_chunk_size: int = 256,
-        mlconv_radius: int = 2,
         dropout_rate: float = 0.15,
         device="cuda"
     ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         self.norm1 = RMSNorm(model_dim)
         self.norm2 = RMSNorm(model_dim)
         self.norm3 = RMSNorm(model_dim)
         self.norm4 = RMSNorm(model_dim)
         self.ssm = SSM(
+            layer_idx=layer_idx,
             model_dim=model_dim,
             state_dim=ssm_state_dim,
             conv_kernel_size=ssm_conv_kernel_size,
@@ -37,8 +39,8 @@ class CrossBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.mha = SelectiveMHA(model_dim, head_dim)
-        self.cross_mha = CrossSelectiveMHA(model_dim, head_dim)
+        self.mha = SelectiveMHA(layer_idx, model_dim, head_dim, is_causal=True)
+        self.cross_mha = CrossSelectiveMHA(layer_idx, model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -46,16 +48,20 @@ class CrossBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         context: torch.Tensor,
-        context_log_gate: torch.Tensor,
+        context_valid_mask: torch.Tensor,
+        context_gate: torch.Tensor,
         ssm_hiddens: torch.Tensor,
         lengths: torch.Tensor | None = None,
+        self_attn_gate_threshold: float | None = None,
+        cross_attn_gate_threshold: float | None = None,
         cache: CrossBlockCache | None = None
     ):
         """
         Args:
             hidden_states: (batch_size, seq_len, model_dim)
             context: (batch_size, context_len, model_dim)
-            context_log_gate: (batch_size, context_len)
+            context_valid_mask: (batch_size, num_heads, context_len)
+            context_gate: (batch_size, num_heads, context_len)
             ssm_hiddens: (batch_size, inner_dim, state_dim)
             lengths: (batch_size,)
         
@@ -75,15 +81,10 @@ class CrossBlock(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv(
-            x=hidden_states, 
-            lengths=lengths, 
-            cache=cache.mlconv_cache if cache is not None else None
-        ).squeeze(-1))
         hidden_states = self.mha(
             hidden_states=hidden_states, 
-            gate=gate, 
-            lengths=lengths, 
+            lengths=lengths,
+            attn_gate_threshold=self_attn_gate_threshold,
             cache=cache.attn_cache if cache is not None else None
         )
         hidden_states = res + self.dropout(hidden_states)
@@ -93,7 +94,9 @@ class CrossBlock(nn.Module):
         hidden_states = self.cross_mha(
             hidden_states=hidden_states,
             context=context,
-            gate=context_log_gate,
+            context_valid_mask=context_valid_mask,
+            gate=context_gate,
+            attn_gate_threshold=cross_attn_gate_threshold,
             cache=cache.cross_attn_cache if cache is not None else None
         )
         hidden_states = res + self.dropout(hidden_states)
@@ -121,13 +124,8 @@ class CrossBlock(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm2(hidden_states)
-        gate = torch.sigmoid(self.gate_conv.step(
-            hidden_states=hidden_states, 
-            cache=cache.mlconv_cache
-        ).squeeze(-1))
         hidden_states = self.mha.step(
             hidden_states=hidden_states, 
-            gate=gate, 
             cache=cache.attn_cache, 
             state=state, 
             gen_cfg=gen_cfg
@@ -136,11 +134,15 @@ class CrossBlock(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm3(hidden_states)
-        hidden_states = self.cross_mha(hidden_states=hidden_states.unsqueeze(1)).squeeze(1)
+        hidden_states = self.cross_mha(
+            hidden_states=hidden_states.unsqueeze(1),
+            attn_gate_threshold=gen_cfg.cross_attn_gate_thresholds[self.layer_idx],
+            cache=cache.cross_attn_cache
+        ).squeeze(1)
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states
-        hidden_states = self.norm3(hidden_states)
+        hidden_states = self.norm4(hidden_states)
         hidden_states = self.ffn(hidden_states)
         hidden_states = res + self.dropout(hidden_states)
 

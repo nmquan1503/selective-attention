@@ -15,7 +15,6 @@ class CausalLMConfig:
     ssm_conv_kernel_size: int = 4
     ssm_num_groups: int = 1
     ssm_chunk_size: int = 256
-    attn_conv_kernel_size: int = 2
     num_layers: int = 4
     dropout_rate: float = 0.15
     device: str | None = "cuda"

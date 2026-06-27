@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig
 from .rope import RoPE
+from ..utils.validation import check_required
 
 def _right_align(
     x: torch.Tensor,
@@ -267,7 +268,10 @@ class SelectiveMHA(nn.Module):
         """
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
-        is_infer = cache is not None
+        is_infer = not self.training
+        check_required(cache, "cache", self.is_causal and is_infer, "causal attention inference")
+        check_required(lengths, "lengths", not self.is_causal, "non causal attention training and inference")
+        
         if is_infer:
             if attn_gate_threshold is None:
                 attn_gate_threshold = 0.0
