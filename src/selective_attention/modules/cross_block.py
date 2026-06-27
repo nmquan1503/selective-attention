@@ -48,10 +48,8 @@ class CrossBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         context: torch.Tensor,
-        context_valid_mask: torch.Tensor,
-        context_gate: torch.Tensor,
+        context_lengths: torch.Tensor,
         ssm_hiddens: torch.Tensor,
-        lengths: torch.Tensor | None = None,
         self_attn_gate_threshold: float | None = None,
         cross_attn_gate_threshold: float | None = None,
         cache: CrossBlockCache | None = None
@@ -60,10 +58,8 @@ class CrossBlock(nn.Module):
         Args:
             hidden_states: (batch_size, seq_len, model_dim)
             context: (batch_size, context_len, model_dim)
-            context_valid_mask: (batch_size, num_heads, context_len)
-            context_gate: (batch_size, num_heads, context_len)
+            context_lengths: (batch_size,)
             ssm_hiddens: (batch_size, inner_dim, state_dim)
-            lengths: (batch_size,)
         
         Returns: 
             hidden_states: (batch_size, seq_len, model_dim)
@@ -73,7 +69,6 @@ class CrossBlock(nn.Module):
         hidden_states = self.norm1(hidden_states)
         hidden_states, last_ssm_hiddens = self.ssm(
             hidden_states=hidden_states, 
-            lengths=lengths, 
             ssm_hiddens=ssm_hiddens, 
             cache=cache.ssm_cache if cache is not None else None
         )
@@ -83,7 +78,6 @@ class CrossBlock(nn.Module):
         hidden_states = self.norm2(hidden_states)
         hidden_states = self.mha(
             hidden_states=hidden_states, 
-            lengths=lengths,
             attn_gate_threshold=self_attn_gate_threshold,
             cache=cache.attn_cache if cache is not None else None
         )
@@ -94,8 +88,7 @@ class CrossBlock(nn.Module):
         hidden_states = self.cross_mha(
             hidden_states=hidden_states,
             context=context,
-            context_valid_mask=context_valid_mask,
-            gate=context_gate,
+            context_lengths=context_lengths,
             attn_gate_threshold=cross_attn_gate_threshold,
             cache=cache.cross_attn_cache if cache is not None else None
         )
@@ -134,11 +127,10 @@ class CrossBlock(nn.Module):
 
         res = hidden_states
         hidden_states = self.norm3(hidden_states)
-        hidden_states = self.cross_mha(
-            hidden_states=hidden_states.unsqueeze(1),
-            attn_gate_threshold=gen_cfg.cross_attn_gate_thresholds[self.layer_idx],
-            cache=cache.cross_attn_cache
-        ).squeeze(1)
+        hidden_states = self.cross_mha.step(
+            hidden_states=hidden_states,
+            cache=cache.cross_attn_cache,
+        )
         hidden_states = res + self.dropout(hidden_states)
 
         res = hidden_states

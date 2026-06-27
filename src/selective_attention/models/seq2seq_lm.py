@@ -55,7 +55,6 @@ class Seq2SeqLM(nn.Module):
             dropout_rate=cfg.dropout_rate,
             device=cfg.device
         )
-        self.gate_proj = nn.Linear(self.cfg.model_dim, self.cfg.model_dim // self.cfg.head_dim)
         self.decoder_layers = nn.ModuleList([
             CrossBlock(
                 layer_idx=layer_idx,
@@ -118,7 +117,7 @@ class Seq2SeqLM(nn.Module):
         lengths: torch.Tensor,
         decoder_input_ids: torch.Tensor,
         enc_attn_gate_thresholds: List[float] | None = None,
-        attn_gate_thresholds: float | None = None,
+        attn_gate_thresholds: List[float] | None = None,
         cross_attn_gate_thresholds: List[float] | None = None,
         cache: list[CrossBlockCache] | None = None
     ):
@@ -147,18 +146,13 @@ class Seq2SeqLM(nn.Module):
             hidden_states=enc_hidden_states,
             lengths=lengths
         )
-        enc_gate = torch.sigmoid(self.gate_proj(enc_hidden_states)).transpose(1, 2).contiguous()
-        idx = torch.arange(enc_seq_len, device=device)
-        pad_mask = lengths.unsqueeze(1) <= idx.unsqueeze(0)
-        enc_valid_mask = ~pad_mask.unsqueeze(1).expand(-1, self.cfg.model_dim // self.cfg.head_dim, -1)
 
         dec_hidden_states = self.embedding(decoder_input_ids)
         for layer_idx, layer in enumerate(self.decoder_layers):
             dec_hidden_states = layer(
                 hidden_states=dec_hidden_states,
                 context=enc_hidden_states,
-                context_valid_mask=enc_valid_mask,
-                context_gate=enc_gate,
+                context_lengths=lengths,
                 ssm_hiddens=ssm_hiddens,
                 self_attn_gate_threshold=attn_gate_thresholds[layer_idx] if attn_gate_thresholds is not None else None,
                 cross_attn_gate_threshold=cross_attn_gate_thresholds[layer_idx] if cross_attn_gate_thresholds is not None else None,

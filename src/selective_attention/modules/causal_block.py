@@ -60,9 +60,6 @@ class CausalBlock(nn.Module):
             hidden_states: (batch_size, seq_len, model_dim)
             last_ssm_hiddens: (batch_size, inner_dim, state_dim)
         """
-        is_infer = cache is not None
-        seq_len = hidden_states.shape[1]
-
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
         hidden_states, last_ssm_hiddens = self.ssm(
