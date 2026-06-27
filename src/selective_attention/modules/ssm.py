@@ -92,7 +92,8 @@ class SSM(nn.Module):
         """
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
-        is_infer = cache is not None
+        is_infer = not self.training
+        is_prefill = is_infer and cache is not None
 
         hBC, gate_logits, delta_raw = torch.split(
             self.in_proj(hidden_states),
@@ -108,7 +109,7 @@ class SSM(nn.Module):
 
         hBC = hBC.transpose(1, 2)
 
-        if is_infer:
+        if is_prefill:
             cache_size = self.conv_kernel_size
             cache.build_conv_ctx(hBC, lengths, cache_size)
         
@@ -137,7 +138,7 @@ class SSM(nn.Module):
             self.chunk_size, True, self.delta_limit, True
         )
 
-        if is_infer:
+        if is_prefill:
             cache.h = last_ssm_hiddens
         
         hidden_states = hidden_states.view(batch_size, seq_len, -1)

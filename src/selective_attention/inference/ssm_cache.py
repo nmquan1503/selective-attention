@@ -8,7 +8,7 @@ class SSMCache:
     def build_conv_ctx(
         self,
         x: torch.Tensor,
-        lengths: torch.Tensor,
+        lengths: torch.Tensor | None,
         cache_size: int,
     ):
         """
@@ -19,12 +19,21 @@ class SSMCache:
         batch_size, dim, seq_len = x.shape
         device = x.device
 
-        cache_idx = torch.arange(cache_size, device=device)[None, None, :]
-        src_idx = lengths[:, None, None] - cache_size + cache_idx
-        valid = (src_idx >= 0) * (src_idx < lengths[:, None, None])
-        src_idx = src_idx.clamp(0, seq_len - 1)
-        src_idx = src_idx.expand(batch_size, dim, cache_size)
-        self.conv_ctx = torch.gather(x, dim=2, index=src_idx) * valid.expand(batch_size, dim, cache_size)
+        if lengths is None:
+            if seq_len < cache_size:
+                self.conv_ctx = torch.zeros((batch_size, dim, cache_size), dtype=x.dtype, device=device)
+                self.conv_ctx[:, :, -seq_len:] = x
+            else:
+                self.conv_ctx = x[:, :, -cache_size:]
+        else:
+            cache_idx = torch.arange(cache_size, device=device)[None, None, :]
+            src_idx = lengths[:, None, None] - cache_size + cache_idx
+            valid = (src_idx >= 0) * (src_idx < lengths[:, None, None])
+            src_idx = src_idx.clamp(0, seq_len - 1)
+            src_idx = src_idx.expand(batch_size, dim, cache_size)
+            self.conv_ctx = torch.gather(x, dim=2, index=src_idx) * valid.expand(batch_size, dim, cache_size)
+
+        self.conv_ctx = self.conv_ctx.contiguous()
 
     def update(self, x: torch.Tensor):
         """
