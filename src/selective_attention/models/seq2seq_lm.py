@@ -31,6 +31,8 @@ class Seq2SeqLM(nn.Module):
         self.embedding = nn.Embedding(cfg.vocab_size, cfg.model_dim)
         self.norm1 = RMSNorm(cfg.model_dim)
         self.norm2 = RMSNorm(cfg.model_dim)
+        self.norm3 = RMSNorm(dim=cfg.ssm_state_dim, num_groups=cfg.model_dim * 2 // cfg.head_dim)
+        self.norm4 = RMSNorm(cfg.model_dim)
         self.encoder_layers = nn.ModuleList([
             BiBlock(
                 layer_idx=layer_idx,
@@ -148,6 +150,8 @@ class Seq2SeqLM(nn.Module):
             lengths=lengths
         )
 
+        enc_hidden_states = self.norm2(enc_hidden_states)
+        ssm_hiddens = self.norm3(ssm_hiddens.transpose(1, 2)).transpose(1, 2)
         dec_hidden_states = self.embedding(decoder_input_ids)
         for layer_idx, layer in enumerate(self.decoder_layers):
             dec_hidden_states = layer(
@@ -160,7 +164,7 @@ class Seq2SeqLM(nn.Module):
                 cache=cache[layer_idx] if cache is not None else None
             )
         
-        dec_hidden_states = self.norm2(dec_hidden_states)
+        dec_hidden_states = self.norm4(dec_hidden_states)
         logits = self.lm_head(dec_hidden_states)
 
         return logits
@@ -187,7 +191,7 @@ class Seq2SeqLM(nn.Module):
                 state=state,
                 gen_cfg=gen_cfg
             )
-        hidden_states = self.norm2(hidden_states)
+        hidden_states = self.norm4(hidden_states)
         logits = self.lm_head(hidden_states)
         return logits
 

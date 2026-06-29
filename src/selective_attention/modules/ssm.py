@@ -84,11 +84,11 @@ class SSM(nn.Module):
         Args:
             hidden_states: (batch_size, seq_len, model_dim)
             lengths: (batch_size,)
-            ssm_hiddens: (batch_size, inner_dim, state_dim)
+            ssm_hiddens: (batch_size, num_heads, head_dim, state_dim)
         
         Returns: 
             hidden_states: (batch_size, seq_len, model_dim)
-            last_ssm_hiddens: (batch_size, inner_dim, state_dim)
+            last_ssm_hiddens: (batch_size, num_heads, head_dim, state_dim)
         """
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
