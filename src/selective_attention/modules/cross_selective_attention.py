@@ -15,11 +15,12 @@ def _gated_softmax(attn_matrix, gate, is_infer, eps=1e-12):
         attn_matrix.sub_(max_val)
         attn_matrix.exp_()
         exp_attn = attn_matrix
-        exp_attn.mul_(gate.unsqueeze(2))
+        exp_attn[:, :, :, 1:].mul_(gate[:, :, 1:].unsqueeze(2))
         numerator = exp_attn
     else:
         exp_attn = torch.exp(attn_matrix - max_val)
         numerator = exp_attn * gate.unsqueeze(2)
+        numerator[:, :, :, 0] = exp_attn[:, :, :, 0]
     denom = numerator.sum(dim=-1, keepdim=True)
 
     if is_infer:
@@ -93,6 +94,7 @@ class CrossSelectiveMHA(nn.Module):
         if is_prefill:
             if attn_gate_threshold is not None:
                 select_mask = (gate >= attn_gate_threshold) & (gate > 0.0)
+                select_mask[:, :, 0] = True
                 gate = compress(gate.unsqueeze(-1), select_mask).squeeze(-1)
                 k = compress(k, select_mask)
                 v = compress(v, select_mask)
