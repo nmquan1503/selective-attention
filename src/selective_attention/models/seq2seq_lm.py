@@ -74,6 +74,7 @@ class Seq2SeqLM(nn.Module):
         ])
         self.lm_head = nn.Linear(cfg.model_dim, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embedding.weight
+        self.dropout = nn.Dropout(cfg.dropout_rate)
     
     def warmup(self, batch_size: int = 2):
         device = self.cfg.device
@@ -144,11 +145,13 @@ class Seq2SeqLM(nn.Module):
                 lengths = lengths,
                 attn_gate_threshold=enc_attn_gate_thresholds[layer_idx] if enc_attn_gate_thresholds is not None else None
             )
+        res = enc_hidden_states
         enc_hidden_states = self.norm1(enc_hidden_states)
         enc_hidden_states, ssm_hiddens = self.ssm(
             hidden_states=enc_hidden_states,
             lengths=lengths
         )
+        enc_hidden_states = res + self.dropout(enc_hidden_states)
 
         enc_hidden_states = self.norm2(enc_hidden_states)
         ssm_hiddens = self.norm3(ssm_hiddens.transpose(1, 2)).transpose(1, 2)
