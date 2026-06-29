@@ -141,7 +141,7 @@ def chunk_scan_chunk_state_backward_u(
     _, _, num_groups, state_dim = B.shape
     device = u.device
 
-    u_grad = torch.empty_like(u)
+    u_grad = torch.zeros_like(u)
     delta_grad = torch.empty_like(delta)
 
     grid = lambda META: (triton.cdiv(chunk_size, META["CHUNK_TILE_SIZE"]) * triton.cdiv(head_dim, META["HEAD_TILE_SIZE"]), batch_size * num_chunks, num_heads)
@@ -197,7 +197,7 @@ def chunk_state_backward_B(
     sm_count = torch.cuda.get_device_properties(u.device).multi_processor_count
     num_heads_per_program = max(min(math.ceil(batch_size * num_chunks * num_heads / sm_count), num_heads_per_group), 1)
     num_splits = triton.cdiv(num_heads_per_group, num_heads_per_program)
-    B_grad = torch.empty(batch_size, seq_len, num_splits, num_groups, state_dim, device=u.device, dtype=torch.float32)
+    B_grad = torch.zeros(batch_size, seq_len, num_splits, num_groups, state_dim, device=u.device, dtype=torch.float32)
 
     grid = lambda META: (triton.cdiv(chunk_size, META["CHUNK_TILE_SIZE"]) * triton.cdiv(state_dim, META["STATE_TILE_SIZE"]), batch_size * num_chunks, num_splits * num_groups)
     chunk_state_backward_B_kernel[grid](
@@ -251,7 +251,7 @@ def chunk_scan_backward_C(
     sm_count = torch.cuda.get_device_properties(device).multi_processor_count
     num_heads_per_program = max(min(math.ceil(batch_size * num_chunks * num_heads / sm_count), num_heads_per_group), 1)
     num_splits = triton.cdiv(num_heads_per_group, num_heads_per_program)
-    C_grad = torch.empty(batch_size, seq_len, num_splits, num_groups, state_dim, device=device, dtype=torch.float32)
+    C_grad = torch.zeros(batch_size, seq_len, num_splits, num_groups, state_dim, device=device, dtype=torch.float32)
     
     grid = lambda META: (triton.cdiv(chunk_size, META["CHUNK_TILE_SIZE"]) * triton.cdiv(state_dim, META["STATE_TILE_SIZE"]), batch_size * num_chunks, num_splits * num_groups)
     chunk_scan_backward_C_grad_kernel[grid](
@@ -384,7 +384,7 @@ def chunk_scan_backward_decay_cumsum(
     device = u.device
 
     CHUNK_TILE_Y_SIZE_MIN = 32
-    decay_grad = torch.empty(batch_size, num_heads, num_chunks, triton.cdiv(chunk_size, CHUNK_TILE_Y_SIZE_MIN), chunk_size, device=device, dtype=torch.float32)
+    decay_grad = torch.zeros(batch_size, num_heads, num_chunks, triton.cdiv(chunk_size, CHUNK_TILE_Y_SIZE_MIN), chunk_size, device=device, dtype=torch.float32)
 
     grid = lambda META: (triton.cdiv(chunk_size, META["CHUNK_TILE_Y_SIZE"]), batch_size * num_chunks, num_heads)
     chunk_scan_backward_decay_cumsum_kernel[grid](
@@ -437,7 +437,7 @@ def chunk_cumsum_backward(
     _, _, num_chunks, chunk_size = decay_grad_total.shape
     
     delta_bias_grad = torch.empty_like(delta_bias) if delta_bias is not None else None
-    delta_raw_grad = torch.empty_like(delta_raw)
+    delta_raw_grad = torch.zeros_like(delta_raw)
     A_grad = torch.empty_like(A)
 
     grid = lambda META: (batch_size, num_chunks, triton.cdiv(num_heads, META["HEAD_GROUP_SIZE"]))
