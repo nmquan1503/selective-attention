@@ -51,7 +51,8 @@ class CrossSelectiveMHA(nn.Module):
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
-        self.gate_proj = nn.Linear(dim, self.num_heads)
+        self.select_gate_proj = nn.Linear(dim, self.num_heads)
+        self.out_gate_proj = nn.Linear(dim, dim)
 
     def forward(
         self, 
@@ -76,7 +77,8 @@ class CrossSelectiveMHA(nn.Module):
         is_infer = not self.training
         is_prefill = is_infer and cache is not None
 
-        gate = torch.sigmoid(self.gate_proj(context)).transpose(1, 2).contiguous()
+        gate = torch.sigmoid(self.select_gate_proj(context)).transpose(1, 2).contiguous()
+        out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
         if context_lengths is not None:
             valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
             if not is_infer:
@@ -107,7 +109,7 @@ class CrossSelectiveMHA(nn.Module):
         attn_weights = _gated_softmax(attn_matrix, gate, is_infer=is_infer)
         out = attn_weights @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
-        hidden_states = self.out_proj(out)
+        hidden_states = self.out_proj(out * out_gate)
 
         return hidden_states
 
@@ -120,12 +122,13 @@ class CrossSelectiveMHA(nn.Module):
             hidden_states: (batch_size, model_dim)
         """
         batch_size = hidden_states.shape[0]
-
+        
+        out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
         q = self.q_proj(hidden_states)
         q = q.view(batch_size, self.num_heads, self.head_dim).unsqueeze(2)
         attn_matrix = (q @ cache.k.transpose(-2, -1)) * self.scale
         attn_weights = _gated_softmax(attn_matrix, cache.gate, is_infer=True)
         out = attn_weights @ cache.v
         out = out.squeeze(2).view(batch_size, self.dim)
-        hidden_states = self.out_proj(out)
+        hidden_states = self.out_proj(out * out_gate)
         return hidden_states
