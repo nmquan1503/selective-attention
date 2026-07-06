@@ -197,7 +197,8 @@ class SSM(nn.Module):
         )
 
         hidden_states = hidden_states.view(batch_size, -1)
-        torch.addcmul(hidden_states, ssm_residual, self.D, value=1.0, out=hidden_states)
+        # torch.addcmul(hidden_states, ssm_residual, self.D, value=1.0, out=hidden_states)
+        hidden_states = hidden_states + self.D * ssm_residual
         hidden_states.mul_(torch.sigmoid(gate_logits))
         hidden_states = self.out_proj(hidden_states)
         
