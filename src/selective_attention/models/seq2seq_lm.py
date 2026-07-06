@@ -231,7 +231,7 @@ class Seq2SeqLM(nn.Module):
             lengths=torch.ones(batch_size, dtype=torch.long, device=device)
         )
         if analysis_cfg is not None:
-            stats = [{}] * self.cfg.num_layers
+            stats = [{} for _ in range(self.cfg.num_layers)]
         else:
             stats = None
 
@@ -269,5 +269,8 @@ class Seq2SeqLM(nn.Module):
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
         first_eos = eos_mask.float().cumsum(dim=1) >= 1
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
+
+        if analysis_cfg is not None:
+            return seq_ids, stats
 
         return seq_ids

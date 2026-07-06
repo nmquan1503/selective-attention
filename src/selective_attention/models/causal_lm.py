@@ -167,7 +167,7 @@ class CausalLM(nn.Module):
         state = InferenceState(lengths)
         stats = None
         if analysis_cfg is not None:
-            stats = [{}] * self.cfg.num_layers
+            stats = [{} for _ in range(self.cfg.num_layers)]
 
         if gen_cfg.attn_gate_thresholds is None:
             gen_cfg.attn_gate_thresholds = [0.0] * self.cfg.num_layers
@@ -201,5 +201,8 @@ class CausalLM(nn.Module):
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
         first_eos = eos_mask.float().cumsum(dim=1) >= 1
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
+
+        if analysis_cfg is not None:
+            return seq_ids, stats
 
         return seq_ids
