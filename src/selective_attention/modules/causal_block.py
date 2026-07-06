@@ -118,7 +118,9 @@ class CausalBlock(nn.Module):
             hidden_states=hidden_states, 
             cache=cache.attn_cache, 
             state=state, 
-            gen_cfg=gen_cfg
+            gen_cfg=gen_cfg,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 

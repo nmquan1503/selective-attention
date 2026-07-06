@@ -102,11 +102,12 @@ class Seq2SeqLM(nn.Module):
             loss.backward()
             self.zero_grad(set_to_none=True)
 
+        self.eval()
         self.generate(input_ids, GenerationConfig(
             bos_token_id=0,
             eos_token_id=1,
             pad_token_id=2,
-            max_new_tokens=1,
+            max_new_tokens=2,
             enc_attn_gate_thresholds=[0.5] * self.cfg.num_layers,
             attn_gate_thresholds=[0.5] * self.cfg.num_layers,
             cross_attn_gate_thresholds=[0.5] * self.cfg.num_layers

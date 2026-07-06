@@ -64,6 +64,7 @@ class CausalLM(nn.Module):
             loss.backward()
             self.zero_grad(set_to_none=True)
 
+        self.eval()
         self.generate(input_ids, GenerationConfig(
             bos_token_id=0,
             eos_token_id=1,
