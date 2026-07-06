@@ -5,6 +5,7 @@ from .causal_block_cache import CausalBlockCache
 from .cross_block_cache import CrossBlockCache
 from .infer_state import InferenceState
 from .generation_config import GenerationConfig
+from .analysis_config import AnalysisConfig
 
 __all__ = [
     "SSMCache", 
@@ -13,5 +14,6 @@ __all__ = [
     "CausalBlockCache",
     "CrossBlockCache",
     "InferenceState",
-    "GenerationConfig"
+    "GenerationConfig",
+    "AnalysisConfig"
 ]

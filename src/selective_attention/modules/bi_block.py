@@ -5,6 +5,7 @@ from .ssm import SSM
 from .selective_attention import SelectiveMHA
 from .feed_forward import SwiGLU
 from .rms_norm import RMSNorm
+from ..inference import AnalysisConfig
 
 class BiBlock(nn.Module):
     def __init__(
@@ -45,6 +46,8 @@ class BiBlock(nn.Module):
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
         attn_gate_threshold: float | None = None,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: dict | None = None
     ):
         """
         Args:
@@ -69,7 +72,9 @@ class BiBlock(nn.Module):
         hidden_states = self.mha(
             hidden_states=hidden_states, 
             lengths=lengths,
-            attn_gate_threshold=attn_gate_threshold
+            attn_gate_threshold=attn_gate_threshold,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 

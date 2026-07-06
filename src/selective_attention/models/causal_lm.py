@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List
 
 from ..modules import RMSNorm, CausalBlock
-from ..inference import InferenceState, CausalBlockCache, GenerationConfig
+from ..inference import InferenceState, CausalBlockCache, GenerationConfig, AnalysisConfig
 
 @dataclass
 class CausalLMConfig:
@@ -79,7 +79,9 @@ class CausalLM(nn.Module):
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
         attn_gate_thresholds: List[float] | None = None,
-        cache: list[CausalBlockCache] | None = None
+        cache: list[CausalBlockCache] | None = None,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: List[dict] | None = None
     ):
         """
         Args:
@@ -103,7 +105,9 @@ class CausalLM(nn.Module):
                 hidden_states=hidden_states, 
                 lengths=lengths,
                 attn_gate_threshold=attn_gate_threshold,
-                cache=cache[layer_idx] if is_infer else None
+                cache=cache[layer_idx] if is_infer else None,
+                analysis_cfg=analysis_cfg,
+                stats=stats[layer_idx] if stats is not None else None
             )
         
         hidden_states = self.norm(hidden_states)
@@ -116,7 +120,9 @@ class CausalLM(nn.Module):
         input_ids: torch.Tensor,
         cache: list[CausalBlockCache], 
         state: InferenceState, 
-        gen_cfg: GenerationConfig
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: List[dict] | None = None
     ):
         """
         Args:
@@ -127,13 +133,25 @@ class CausalLM(nn.Module):
         """
         hidden_states = self.embedding(input_ids)
         for layer_idx, layer in enumerate(self.layers):
-            hidden_states = layer.step(hidden_states, cache[layer_idx], state, gen_cfg)
+            hidden_states = layer.step(
+                hidden_states, 
+                cache[layer_idx], 
+                state, 
+                gen_cfg,
+                analysis_cfg,
+                stats[layer_idx] if stats is not None else None
+            )
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         return logits
 
     @torch.no_grad()
-    def generate(self, input_ids: torch.Tensor, gen_cfg: GenerationConfig):
+    def generate(
+        self, 
+        input_ids: torch.Tensor, 
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig | None = None
+    ):
         """
         Args:
             input_ids: (batch_size, seq_len)
@@ -147,11 +165,15 @@ class CausalLM(nn.Module):
         cache = [CausalBlockCache() for _ in range(self.cfg.num_layers)]
         lengths = (input_ids != gen_cfg.pad_token_id).sum(dim=1)
         state = InferenceState(lengths)
+        stats = None
+        if analysis_cfg is not None:
+            stats = [{}] * self.cfg.num_layers
+
         if gen_cfg.attn_gate_thresholds is None:
             gen_cfg.attn_gate_thresholds = [0.0] * self.cfg.num_layers
 
         last_indices = lengths - 1
-        logits = self.forward(input_ids, lengths, gen_cfg.attn_gate_thresholds, cache)
+        logits = self.forward(input_ids, lengths, gen_cfg.attn_gate_thresholds, cache, analysis_cfg, stats)
         logits = logits[torch.arange(batch_size, device=device), last_indices]
         
         seq_ids = torch.full(
@@ -173,7 +195,7 @@ class CausalLM(nn.Module):
             if finished.all():
                 break
 
-            logits = self.step(next_token, cache, state, gen_cfg)
+            logits = self.step(next_token, cache, state, gen_cfg, analysis_cfg, stats)
             state.update()
 
         eos_mask = (seq_ids == gen_cfg.eos_token_id)

@@ -8,7 +8,7 @@ from .ssm import SSM
 from .selective_attention import SelectiveMHA
 from .feed_forward import SwiGLU
 from .rms_norm import RMSNorm
-from ..inference import CausalBlockCache, InferenceState, GenerationConfig
+from ..inference import CausalBlockCache, InferenceState, GenerationConfig, AnalysisConfig
 
 class CausalBlock(nn.Module):
     def __init__(
@@ -49,7 +49,9 @@ class CausalBlock(nn.Module):
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
         attn_gate_threshold: float | None = None,
-        cache: CausalBlockCache | None = None
+        cache: CausalBlockCache | None = None,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: dict | None = None
     ):
         """
         Args:
@@ -75,7 +77,9 @@ class CausalBlock(nn.Module):
             hidden_states=hidden_states, 
             lengths=lengths,
             attn_gate_threshold=attn_gate_threshold,
-            cache=cache.attn_cache if cache is not None else None
+            cache=cache.attn_cache if cache is not None else None,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 
@@ -86,7 +90,15 @@ class CausalBlock(nn.Module):
 
         return hidden_states, last_ssm_hiddens
 
-    def step(self, hidden_states: torch.Tensor, cache: CausalBlockCache, state: InferenceState, gen_cfg: GenerationConfig):
+    def step(
+        self, 
+        hidden_states: torch.Tensor, 
+        cache: CausalBlockCache, 
+        state: InferenceState, 
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: dict | None = None
+    ):
         """
         Args: (batch_size, model_dim)
         Returns: (batch_size, model_dim)

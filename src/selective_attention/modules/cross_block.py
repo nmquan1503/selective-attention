@@ -6,7 +6,7 @@ from .selective_attention import SelectiveMHA
 from .cross_selective_attention import CrossSelectiveMHA
 from .feed_forward import SwiGLU
 from .rms_norm import RMSNorm
-from ..inference import CrossBlockCache, InferenceState, GenerationConfig
+from ..inference import CrossBlockCache, InferenceState, GenerationConfig, AnalysisConfig
 
 class CrossBlock(nn.Module):
     def __init__(
@@ -52,7 +52,9 @@ class CrossBlock(nn.Module):
         ssm_hiddens: torch.Tensor,
         self_attn_gate_threshold: float | None = None,
         cross_attn_gate_threshold: float | None = None,
-        cache: CrossBlockCache | None = None
+        cache: CrossBlockCache | None = None,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: dict | None = None
     ):
         """
         Args:
@@ -79,7 +81,9 @@ class CrossBlock(nn.Module):
         hidden_states = self.mha(
             hidden_states=hidden_states, 
             attn_gate_threshold=self_attn_gate_threshold,
-            cache=cache.attn_cache if cache is not None else None
+            cache=cache.attn_cache if cache is not None else None,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 
@@ -90,7 +94,9 @@ class CrossBlock(nn.Module):
             context=context,
             context_lengths=context_lengths,
             attn_gate_threshold=cross_attn_gate_threshold,
-            cache=cache.cross_attn_cache if cache is not None else None
+            cache=cache.cross_attn_cache if cache is not None else None,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 
@@ -101,7 +107,15 @@ class CrossBlock(nn.Module):
         
         return hidden_states
 
-    def step(self, hidden_states: torch.Tensor, cache: CrossBlockCache, state: InferenceState, gen_cfg: GenerationConfig):
+    def step(
+        self,
+        hidden_states: torch.Tensor, 
+        cache: CrossBlockCache, 
+        state: InferenceState, 
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig,
+        stats: dict | None = None
+    ):
         """
         Args: (batch_size, model_dim)
         Returns: (batch_size, model_dim)
@@ -121,7 +135,9 @@ class CrossBlock(nn.Module):
             hidden_states=hidden_states, 
             cache=cache.attn_cache, 
             state=state, 
-            gen_cfg=gen_cfg
+            gen_cfg=gen_cfg,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 
@@ -130,6 +146,8 @@ class CrossBlock(nn.Module):
         hidden_states = self.cross_mha.step(
             hidden_states=hidden_states,
             cache=cache.cross_attn_cache,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 

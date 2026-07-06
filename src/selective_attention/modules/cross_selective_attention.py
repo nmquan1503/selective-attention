@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from ..inference import CrossSelectiveAttnCache, GenerationConfig
+from ..inference import CrossSelectiveAttnCache, GenerationConfig, AnalysisConfig
 from ..utils.tensor_utils import compress
 
 def _gated_softmax(attn_matrix, gate, is_infer, eps=1e-12):
@@ -60,7 +60,9 @@ class CrossSelectiveMHA(nn.Module):
         context: torch.Tensor,
         context_lengths: torch.Tensor | None = None,
         attn_gate_threshold: float | None = None,
-        cache: CrossSelectiveAttnCache | None = None
+        cache: CrossSelectiveAttnCache | None = None,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: dict | None = None
     ):
         """
         Args:
@@ -111,9 +113,52 @@ class CrossSelectiveMHA(nn.Module):
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
         hidden_states = self.out_proj(out * out_gate)
 
+        if analysis_cfg is not None and stats is not None:
+            if context_lengths is not None:
+                scale = context_lengths.view(batch_size, 1, 1, 1).to(dtype=attn_weights.dtype)
+            else:
+                scale = context_len
+            scaled_weight = attn_weights * scale
+            
+            if context_lengths is not None:
+                pos = torch.arange(context_len, device=device)
+                key_valid = (pos.unsqueeze(0) < context_lengths.unsqueeze(1)).view(batch_size, 1, 1, context_len)
+                scaled_weight = scaled_weight * key_valid
+
+            sum_per_key = scaled_weight.sum(dim=2)
+            count_per_key = (scaled_weight > 0).sum(dim=2)
+
+            num_bins = analysis_cfg.gate_attn_num_bins
+            bin_sum = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
+            bin_count = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
+
+            for b in range(batch_size):
+                for h in range(self.num_heads):
+                    for k in range(context_len):
+                        cnt = count_per_key[b, h, k].item()
+                        if cnt > 0:
+                            g_val = gate[b, h, k].item()
+                            if g_val == 0:
+                                continue
+                            s_val = sum_per_key[b, h, k].item()
+                            bin_idx = max(0, min(int(g_val * num_bins), num_bins - 1))
+                            bin_sum[h, bin_idx] += s_val
+                            bin_count[h, bin_idx] += cnt
+
+            stats["cross_attn_gate_analysis"] = {
+                "sum": bin_sum,
+                "count": bin_count
+            }
+
         return hidden_states
 
-    def step(self, hidden_states: torch.Tensor, cache: CrossSelectiveAttnCache):
+    def step(
+        self, 
+        hidden_states: torch.Tensor, 
+        cache: CrossSelectiveAttnCache,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: dict | None = None
+    ):
         """
         Args:
             hidden_states: (batch_size, model_dim)
@@ -122,6 +167,7 @@ class CrossSelectiveMHA(nn.Module):
             hidden_states: (batch_size, model_dim)
         """
         batch_size = hidden_states.shape[0]
+        device = hidden_states.device
         
         out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
         q = self.q_proj(hidden_states)
@@ -131,4 +177,30 @@ class CrossSelectiveMHA(nn.Module):
         out = attn_weights @ cache.v
         out = out.squeeze(2).view(batch_size, self.dim)
         hidden_states = self.out_proj(out * out_gate)
+
+        if analysis_cfg is not None and stats is not None:
+            K = cache.gate.shape[2]
+            scale = (cache.gate > 0).sum(dim=-1, keepdim=True).float()
+            scaled_weight = attn_weights * scale.unsqueeze(2)
+            key_valid_mask = (cache.gate > 0).unsqueeze(2)
+            scaled_weight = scaled_weight * key_valid_mask
+            sum_per_key = scaled_weight.sum(dim=2)
+            count_per_key = (scaled_weight > 0).sum(dim=2)
+            num_bins = analysis_cfg.gate_attn_num_bins
+            key = "cross_attn_gate_analysis"
+            bin_sum = stats[key]["sum"]
+            bin_count = stats[key]["count"]
+            for b in range(batch_size):
+                for h in range(self.num_heads):
+                    for k in range(K):
+                        cnt = count_per_key[b, h, k].item()
+                        if cnt > 0:
+                            g_val = cache.gate[b, h, k].item()
+                            if g_val == 0:
+                                continue
+                            s_val = sum_per_key[b, h, k].item()
+                            bin_idx = max(0, min(int(g_val * num_bins), num_bins - 1))
+                            bin_sum[h, bin_idx] += s_val
+                            bin_count[h, bin_idx] += cnt
+
         return hidden_states

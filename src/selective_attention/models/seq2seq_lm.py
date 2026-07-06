@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict
 
 from ..modules import BiBlock, CrossBlock, SSM, RMSNorm
-from ..inference import CrossBlockCache, InferenceState, GenerationConfig
+from ..inference import CrossBlockCache, InferenceState, GenerationConfig, AnalysisConfig
 
 @dataclass
 class Seq2SeqLMConfig:
@@ -123,7 +123,9 @@ class Seq2SeqLM(nn.Module):
         enc_attn_gate_thresholds: List[float] | None = None,
         attn_gate_thresholds: List[float] | None = None,
         cross_attn_gate_thresholds: List[float] | None = None,
-        cache: list[CrossBlockCache] | None = None
+        cache: list[CrossBlockCache] | None = None,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: List[Dict] | None = None
     ):
         """
         Args:
@@ -143,7 +145,9 @@ class Seq2SeqLM(nn.Module):
             enc_hidden_states, _ = layer(
                 hidden_states=enc_hidden_states,
                 lengths = lengths,
-                attn_gate_threshold=enc_attn_gate_thresholds[layer_idx] if enc_attn_gate_thresholds is not None else None
+                attn_gate_threshold=enc_attn_gate_thresholds[layer_idx] if enc_attn_gate_thresholds is not None else None,
+                analysis_cfg=analysis_cfg,
+                stats=stats[layer_idx] if stats is not None else None
             )
         res = enc_hidden_states
         enc_hidden_states = self.norm1(enc_hidden_states)
@@ -164,7 +168,9 @@ class Seq2SeqLM(nn.Module):
                 ssm_hiddens=ssm_hiddens,
                 self_attn_gate_threshold=attn_gate_thresholds[layer_idx] if attn_gate_thresholds is not None else None,
                 cross_attn_gate_threshold=cross_attn_gate_thresholds[layer_idx] if cross_attn_gate_thresholds is not None else None,
-                cache=cache[layer_idx] if cache is not None else None
+                cache=cache[layer_idx] if cache is not None else None,
+                analysis_cfg=analysis_cfg,
+                stats=stats[layer_idx] if stats is not None else None
             )
         
         dec_hidden_states = self.norm4(dec_hidden_states)
@@ -177,7 +183,9 @@ class Seq2SeqLM(nn.Module):
         input_ids: torch.Tensor,
         cache: list[CrossBlockCache],
         state: InferenceState,
-        gen_cfg: GenerationConfig
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: List[Dict] | None = None
     ):
         """
         Args:
@@ -192,7 +200,9 @@ class Seq2SeqLM(nn.Module):
                 hidden_states=hidden_states,
                 cache=cache[layer_idx],
                 state=state,
-                gen_cfg=gen_cfg
+                gen_cfg=gen_cfg,
+                analysis_cfg=analysis_cfg,
+                stats=stats[layer_idx] if stats is not None else None
             )
         hidden_states = self.norm4(hidden_states)
         logits = self.lm_head(hidden_states)
@@ -202,7 +212,8 @@ class Seq2SeqLM(nn.Module):
     def generate(
         self,
         input_ids: torch.Tensor,
-        gen_cfg: GenerationConfig
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig | None = None
     ):
         """
         Args:
@@ -219,6 +230,10 @@ class Seq2SeqLM(nn.Module):
         state = InferenceState(
             lengths=torch.ones(batch_size, dtype=torch.long, device=device)
         )
+        if analysis_cfg is not None:
+            stats = [{}] * self.cfg.num_layers
+        else:
+            stats = None
 
         lengths = (input_ids != gen_cfg.pad_token_id).sum(dim=1)
         seq_ids = torch.full(
@@ -235,7 +250,9 @@ class Seq2SeqLM(nn.Module):
             enc_attn_gate_thresholds=gen_cfg.enc_attn_gate_thresholds,
             attn_gate_thresholds=gen_cfg.attn_gate_thresholds,
             cross_attn_gate_thresholds=gen_cfg.cross_attn_gate_thresholds,
-            cache=cache
+            cache=cache,
+            analysis_cfg=analysis_cfg,
+            stats=stats
         ).squeeze(1)
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
         for _ in range(gen_cfg.max_new_tokens - 1):
@@ -246,7 +263,7 @@ class Seq2SeqLM(nn.Module):
             if finished.all():
                 break
         
-            logits = self.step(next_token, cache, state, gen_cfg)
+            logits = self.step(next_token, cache, state, gen_cfg, analysis_cfg, stats)
             state.update()
         
         eos_mask = (seq_ids == gen_cfg.eos_token_id)

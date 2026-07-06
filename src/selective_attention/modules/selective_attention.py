@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict
 
-from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig
+from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig, AnalysisConfig
 from .rope import RoPE
 from ..utils.tensor_utils import compress, pad_buffer
 
@@ -181,7 +182,9 @@ class SelectiveMHA(nn.Module):
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
         attn_gate_threshold: float | None = None,
-        cache: SelectiveAttnCache | None = None
+        cache: SelectiveAttnCache | None = None,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: Dict | None = None
     ):
         """
         Args:
@@ -247,6 +250,54 @@ class SelectiveMHA(nn.Module):
         if is_prefill:
             cache.build_kv(k_rot, v_aligned, select_gate)
         
+        if analysis_cfg is not None and stats is not None:
+            if is_compressed:
+                raise ValueError("")
+            if self.is_causal:
+                scale = torch.arange(1, seq_len + 1, device=device).view(1, 1, seq_len, 1)
+            elif lengths is not None:
+                scale = lengths.view(-1, 1, 1, 1)
+            else:
+                scale = torch.tensor(seq_len, device=device, dtype=attn_weight.dtype)
+            scaled_weight = attn_weight * scale
+            pos = torch.arange(seq_len, device=device)
+            if lengths is not None:
+                query_valid = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(-1) 
+                key_valid   = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(1)
+                padding_mask = query_valid & key_valid 
+                scaled_weight = scaled_weight * padding_mask.unsqueeze(1)
+
+            if self.is_causal:
+                causal_valid = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
+                scaled_weight = scaled_weight * causal_valid.unsqueeze(0).unsqueeze(1)
+
+            self_mask = ~torch.eye(seq_len, dtype=torch.bool, device=device)
+            scaled_weight = scaled_weight * self_mask.unsqueeze(0).unsqueeze(0)
+
+            sum_per_key = scaled_weight.sum(dim=2)
+            count_per_key = (scaled_weight > 0).sum(dim=2)
+
+            num_bins = analysis_cfg.gate_attn_num_bins
+            bin_sum = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
+            bin_count = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
+
+            for b in range(batch_size):
+                max_len = lengths[b].item() if lengths is not None else seq_len
+                for h in range(self.num_heads):
+                    for s in range(max_len):
+                        cnt = count_per_key[b, h, s].item()
+                        if cnt > 0:
+                            gate_val = select_gate[b, h, s].item()
+                            sum_val = sum_per_key[b, h, s].item()
+                            bin_idx = max(0, min(int(gate_val * num_bins), num_bins - 1))
+                            bin_sum[h, bin_idx] += sum_val
+                            bin_count[h, bin_idx] += cnt
+            
+            stats[f"{'causal' if self.is_causal else 'non_causal'}_attn_gate_analysis"] = {
+                "sum": bin_sum,
+                "count": bin_count
+            }
+
         return hidden_states
 
     def step(
@@ -255,6 +306,8 @@ class SelectiveMHA(nn.Module):
         cache: SelectiveAttnCache, 
         state: InferenceState,
         gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig | None = None,
+        stats: Dict | None = None
     ):
         """
         Args:
@@ -279,7 +332,7 @@ class SelectiveMHA(nn.Module):
         gate = torch.sigmoid(self.gate_proj(hidden_states))
         select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
         valid_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
-        select_gate *= valid_mask
+        select_gate = select_gate * valid_mask
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -310,5 +363,24 @@ class SelectiveMHA(nn.Module):
 
         if not valid_mask.any():
             cache.write_idx -= 1
+
+        if analysis_cfg is not None and stats is not None:
+            seq_len = cache.write_idx
+            scaled_weight = attn_weight * seq_len
+
+            num_bins = analysis_cfg.gate_attn_num_bins
+            bin_sum = stats["causal_attn_gate_analysis"]["sum"]
+            bin_count = stats["causal_attn_gate_analysis"]["count"]
+
+            for b in range(batch_size):
+                for h in range(self.num_heads):
+                    for j in range(seq_len - 1):
+                        gate_val = cached_gate[b, h, j].item()
+                        if gate_val == 0:
+                            continue
+                        w = scaled_weight[b, h, j].item()
+                        bin_idx = max(0, min(int(gate_val * num_bins), num_bins - 1))
+                        bin_sum[h, bin_idx] += w
+                        bin_count[h, bin_idx] += 1
 
         return self.out_proj(out * out_gate)
