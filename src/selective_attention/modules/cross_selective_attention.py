@@ -130,25 +130,19 @@ class CrossSelectiveMHA(nn.Module):
             count_per_key = (scaled_weight > 0).sum(dim=2)
 
             num_bins = analysis_cfg.gate_attn_num_bins
-            bin_sum = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
-            bin_count = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
+            bin_idx = (gate * num_bins).long().clamp(0, num_bins - 1)
+            head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, context_len).reshape(-1)
+            flat_index = head_idx * num_bins + bin_idx.reshape(-1)
 
-            for b in range(batch_size):
-                for h in range(self.num_heads):
-                    for k in range(context_len):
-                        cnt = count_per_key[b, h, k].item()
-                        if cnt > 0:
-                            g_val = gate[b, h, k].item()
-                            if g_val == 0:
-                                continue
-                            s_val = sum_per_key[b, h, k].item()
-                            bin_idx = max(0, min(int(g_val * num_bins), num_bins - 1))
-                            bin_sum[h, bin_idx] += s_val
-                            bin_count[h, bin_idx] += cnt
+            bin_sum_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            bin_count_flat = torch.zeros_like(bin_sum_flat)
+
+            bin_sum_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
+            bin_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
 
             stats["cross_attn_gate_analysis"] = {
-                "sum": bin_sum,
-                "count": bin_count
+                "sum": bin_sum_flat.view(self.num_heads, num_bins),
+                "count": bin_count_flat.view(self.num_heads, num_bins)
             }
 
         return hidden_states
@@ -189,20 +183,20 @@ class CrossSelectiveMHA(nn.Module):
             sum_per_key = scaled_weight.sum(dim=2)
             count_per_key = (scaled_weight > 0).sum(dim=2)
             num_bins = analysis_cfg.gate_attn_num_bins
+            gate_vals = cache.gate
+
+            bin_idx = (gate_vals * num_bins).long().clamp(0, num_bins - 1)
+            head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, K).reshape(-1)
+            flat_index = head_idx * num_bins + bin_idx.reshape(-1)
+
+            step_sum = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            step_count = torch.zeros_like(step_sum)
+
+            step_sum.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
+            step_count.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+
             key = "cross_attn_gate_analysis"
-            bin_sum = stats[key]["sum"]
-            bin_count = stats[key]["count"]
-            for b in range(batch_size):
-                for h in range(self.num_heads):
-                    for k in range(K):
-                        cnt = count_per_key[b, h, k].item()
-                        if cnt > 0:
-                            g_val = cache.gate[b, h, k].item()
-                            if g_val == 0:
-                                continue
-                            s_val = sum_per_key[b, h, k].item()
-                            bin_idx = max(0, min(int(g_val * num_bins), num_bins - 1))
-                            bin_sum[h, bin_idx] += s_val
-                            bin_count[h, bin_idx] += cnt
+            stats[key]["sum"] += step_sum.view(self.num_heads, num_bins)
+            stats[key]["count"] += step_count.view(self.num_heads, num_bins)
 
         return hidden_states

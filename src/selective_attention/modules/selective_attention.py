@@ -282,20 +282,19 @@ class SelectiveMHA(nn.Module):
             count_per_key = (scaled_weight > 0).sum(dim=2)
 
             num_bins = analysis_cfg.gate_attn_num_bins
-            bin_sum = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
-            bin_count = torch.zeros((self.num_heads, num_bins), dtype=torch.float32, device=device)
-
-            for b in range(batch_size):
-                max_len = lengths[b].item() if lengths is not None else seq_len
-                for h in range(self.num_heads):
-                    for s in range(max_len):
-                        cnt = count_per_key[b, h, s].item()
-                        if cnt > 0:
-                            gate_val = select_gate[b, h, s].item()
-                            sum_val = sum_per_key[b, h, s].item()
-                            bin_idx = max(0, min(int(gate_val * num_bins), num_bins - 1))
-                            bin_sum[h, bin_idx] += sum_val
-                            bin_count[h, bin_idx] += cnt
+            gate_vals = select_gate  # (batch_size, num_heads, seq_len)
+            bin_idx = (gate_vals * num_bins).long().clamp(0, num_bins - 1)
+            head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, seq_len).reshape(-1)
+            flat_index = head_idx * num_bins + bin_idx.reshape(-1)
+            
+            bin_sum_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            bin_count_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            
+            bin_sum_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
+            bin_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+            
+            bin_sum = bin_sum_flat.view(self.num_heads, num_bins)
+            bin_count = bin_count_flat.view(self.num_heads, num_bins)
             
             stats[f"{'causal' if self.is_causal else 'non_causal'}_attn_gate_analysis"] = {
                 "sum": bin_sum,
@@ -378,16 +377,26 @@ class SelectiveMHA(nn.Module):
             bin_sum = stats["causal_attn_gate_analysis"]["sum"]
             bin_count = stats["causal_attn_gate_analysis"]["count"]
 
-            for b in range(batch_size):
-                for h in range(self.num_heads):
-                    for j in range(seq_len - 1):
-                        gate_val = cached_gate[b, h, j].item()
-                        if gate_val == 0:
-                            continue
-                        w = scaled_weight[b, h, j].item()
-                        bin_idx = max(0, min(int(gate_val * num_bins), num_bins - 1))
-                        bin_sum[h, bin_idx] += w
-                        bin_count[h, bin_idx] += 1
+            gate_sub = cached_gate[:, :, :seq_len-1]
+            weight_sub = scaled_weight[:, :, :seq_len-1]
+
+            B, H, S_minus_1 = gate_sub.shape
+            bin_idx = (gate_sub * num_bins).long().clamp(0, num_bins - 1)
+            head_idx = torch.arange(H, device=device).view(1, H, 1).expand(B, -1, S_minus_1).reshape(-1)
+            flat_index = head_idx * num_bins + bin_idx.reshape(-1)
+
+            mask_valid = (gate_sub > 0).float()
+            sum_flat = (weight_sub * mask_valid).reshape(-1)
+            count_flat = mask_valid.reshape(-1)
+
+            step_sum = torch.zeros(H * num_bins, dtype=torch.float32, device=device)
+            step_count = torch.zeros(H * num_bins, dtype=torch.float32, device=device)
+
+            step_sum.scatter_add_(0, flat_index, sum_flat)
+            step_count.scatter_add_(0, flat_index, count_flat)
+
+            bin_sum += step_sum.view(H, num_bins)
+            bin_count += step_count.view(H, num_bins)
 
         # return self.out_proj(out * out_gate)
         return self.out_proj(out)
