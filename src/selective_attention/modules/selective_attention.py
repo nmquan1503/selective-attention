@@ -160,7 +160,7 @@ class SelectiveMHA(nn.Module):
         self.is_causal = is_causal
         self.scale = self.head_dim ** -0.5
 
-        self.gate_proj = nn.Linear(dim, self.num_heads)
+        self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.rope = RoPE(self.head_dim)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
