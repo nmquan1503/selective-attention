@@ -8,14 +8,14 @@ from .rope import RoPE
 from ..utils.tensor_utils import compress, pad_buffer
 
 def _reset_cache(cache: SelectiveAttnCache, buffer_size: int):
-    valid_mask = cache.gate > 0.0
+    valid_mask = ~torch.isinf(cache.log_gate)
     all_kept = valid_mask.all(dim=-1)
     if not all_kept.any():
-        cache.gate = compress(cache.gate.unsqueeze(-1), valid_mask, buffer_size=buffer_size).squeeze(-1)
+        cache.log_gate = compress(cache.log_gate.unsqueeze(-1), valid_mask, buffer_size=buffer_size).squeeze(-1)
         cache.k_rot = compress(cache.k_rot, valid_mask, buffer_size=buffer_size)
         cache.v = compress(cache.v, valid_mask, buffer_size=buffer_size)
     else:
-        cache.gate = pad_buffer(cache.gate.unsqueeze(-1), buffer_size).squeeze(-1)
+        cache.log_gate = pad_buffer(cache.log_gate.unsqueeze(-1), buffer_size).squeeze(-1)
         cache.k_rot = pad_buffer(cache.k_rot, buffer_size)
         cache.v = pad_buffer(cache.v, buffer_size)
     if cache.k_rot is not None:
@@ -94,11 +94,10 @@ def _build_attn_matrix(
             attn_matrix = attn_matrix.masked_fill(causal_mask, float("-inf"))
     
     return attn_matrix, k, is_compressed
-
+    
 def _gated_softmax(
     attn_matrix: torch.Tensor,
-    gate: torch.Tensor,
-    eps: float = 1e-12,
+    log_gate: torch.Tensor,
     mode: str = "seq",
     is_infer: bool = False,
     is_compressed: bool = False
@@ -117,40 +116,31 @@ def _gated_softmax(
                 attn_matrix: (batch_size, num_heads, num_keys)
                 gate: (batch_size, num_heads, num_keys)
     """
-    seq_len = attn_matrix.shape[-2]
+    
+    if mode == "pos":
+        attn_matrix[..., :-1] += log_gate[..., :-1]
+        return F.softmax(attn_matrix, dim=-1)
+    
+    elif mode == "seq":
+        if is_compressed:
+            attn_matrix[..., :-1] += log_gate.unsqueeze(2)
 
-    max_val = attn_matrix.max(dim=-1, keepdim=True).values
-    if is_infer:
-        attn_matrix.sub_(max_val)
-        attn_matrix.exp_()
-        exp_attn = attn_matrix
-        if mode == "pos":
-            exp_attn[..., :-1].mul_(gate[..., :-1])
-            numerator = exp_attn
         else:
-            if is_compressed:
-                exp_attn[..., :-1].mul_(gate.unsqueeze(2))
-                numerator = exp_attn
+            seq_len = attn_matrix.shape[-1]
+            device = attn_matrix.device
+
+            diag = torch.arange(seq_len, device=device)
+            if is_infer:
+                attn_matrix_diag = attn_matrix[:, :, diag, diag].clone()
+                attn_matrix += log_gate.unsqueeze(2)
+                attn_matrix[:, :, diag, diag] = attn_matrix_diag
+            
             else:
-                numerator = exp_attn * gate.unsqueeze(2)
-                diag = torch.arange(seq_len, device=attn_matrix.device)
-                numerator[..., diag, diag] = exp_attn[..., diag, diag]
+                attn_matrix_diag = attn_matrix[:, :, diag, diag]
+                attn_matrix = attn_matrix + log_gate.unsqueeze(2)
+                attn_matrix[:, :, diag, diag] = attn_matrix_diag
 
-    else:
-        exp_attn = torch.exp(attn_matrix - max_val)
-        numerator = exp_attn * gate.unsqueeze(2)
-        diag = torch.arange(seq_len, device=attn_matrix.device)
-        numerator[..., diag, diag] = exp_attn[..., diag, diag]
-
-    denom = numerator.sum(dim=-1, keepdim=True)
-    
-    if is_infer:
-        numerator.div_(denom + eps)
-        attn_weight = numerator
-    else:
-        attn_weight = numerator / (denom + eps)
-    
-    return attn_weight
+        return F.softmax(attn_matrix, dim=-1)
 
 class SelectiveMHA(nn.Module):
     def __init__(
@@ -239,7 +229,9 @@ class SelectiveMHA(nn.Module):
         attn_matrix, k_rot, is_compressed = _build_attn_matrix(q_rot, k_rot, self.scale, valid_mask, self.is_causal, is_infer)
         if is_compressed:
             select_gate = compress(select_gate.unsqueeze(-1), valid_mask).squeeze(-1)
-        attn_weight = _gated_softmax(attn_matrix, select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
+        
+        log_select_gate = torch.log(select_gate)
+        attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 
         if is_compressed:
             v_aligned = compress(v, valid_mask)
@@ -252,7 +244,7 @@ class SelectiveMHA(nn.Module):
         hidden_states = self.out_proj(out)
         
         if is_prefill:
-            cache.build_kv(k_rot, v_aligned, select_gate)
+            cache.build_kv(k_rot, v_aligned, log_select_gate)
         
         if analysis_cfg is not None and stats is not None:
             if is_compressed:
@@ -328,7 +320,7 @@ class SelectiveMHA(nn.Module):
             if cache.k_rot is None:
                 cache.k_rot = torch.empty((batch_size, self.num_heads, gen_cfg.cache_update_interval, self.head_dim), device=device, dtype=torch.float32)
                 cache.v = torch.empty((batch_size, self.num_heads, gen_cfg.cache_update_interval, self.head_dim), device=device, dtype=torch.float32)
-                cache.gate = torch.zeros((batch_size, self.num_heads, gen_cfg.cache_update_interval), device=device, dtype=torch.float32)
+                cache.log_gate = torch.zeros((batch_size, self.num_heads, gen_cfg.cache_update_interval), device=device, dtype=torch.float32)
             else:
                 _reset_cache(cache, gen_cfg.cache_update_interval)
         
@@ -337,6 +329,7 @@ class SelectiveMHA(nn.Module):
         select_gate = torch.sigmoid(self.gate_proj(hidden_states))
         valid_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
         select_gate = select_gate * valid_mask
+        log_select_gate = torch.log(select_gate)
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -348,7 +341,7 @@ class SelectiveMHA(nn.Module):
         
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
         
-        cache.update_kv(k_rot, v, select_gate)
+        cache.update_kv(k_rot, v, log_select_gate)
 
         if cache.write_idx <= 1:
             # return self.out_proj(v.view(batch_size, -1) * out_gate)
@@ -356,12 +349,12 @@ class SelectiveMHA(nn.Module):
 
         cached_k = cache.k_rot[:, :, :cache.write_idx, :] 
         cached_v = cache.v[:, :, :cache.write_idx, :] 
-        cached_gate = cache.gate[:, :, :cache.write_idx]
+        cached_log_gate = cache.log_gate[:, :, :cache.write_idx]
 
         attn_matrix = (q_rot.unsqueeze(2) @ cached_k.transpose(-2, -1)).squeeze(2)
         attn_matrix.mul_(self.scale)
 
-        attn_weight = _gated_softmax(attn_matrix, cached_gate, mode="pos", is_infer=True)
+        attn_weight = _gated_softmax(attn_matrix, cached_log_gate, mode="pos", is_infer=True)
 
         out = attn_weight.unsqueeze(2) @ cached_v
         out = out.squeeze(2).view(batch_size, self.dim)
@@ -377,7 +370,7 @@ class SelectiveMHA(nn.Module):
             bin_sum = stats["causal_attn_gate_analysis"]["sum"]
             bin_count = stats["causal_attn_gate_analysis"]["count"]
 
-            gate_sub = cached_gate[:, :, :seq_len-1]
+            gate_sub = torch.exp(cached_log_gate[:, :, :seq_len-1])
             weight_sub = scaled_weight[:, :, :seq_len-1]
 
             B, H, S_minus_1 = gate_sub.shape
