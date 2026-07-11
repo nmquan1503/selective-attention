@@ -106,15 +106,15 @@ def _gated_softmax(
     Args:
         if TRAINING:
             attn_matrix: (batch_size, num_heads, seq_len, seq_len)
-            gate: (batch_size, num_heads, seq_len)
+            log_gate: (batch_size, num_heads, seq_len)
 
         if INFER:
             SEQ MODE:
                 attn_matrix: (batch_size, num_heads, seq_len, num_keys + 1)
-                gate: (batch_size, num_heads, num_keys)
+                log_gate: (batch_size, num_heads, num_keys)
             POS MODE:
                 attn_matrix: (batch_size, num_heads, num_keys)
-                gate: (batch_size, num_heads, num_keys)
+                log_gate: (batch_size, num_heads, num_keys)
     """
     
     if mode == "pos":
@@ -160,13 +160,14 @@ class SelectiveMHA(nn.Module):
         self.is_causal = is_causal
         self.scale = self.head_dim ** -0.5
 
-        # self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.gate_proj = nn.Linear(dim, self.num_heads)
         self.rope = RoPE(self.head_dim)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
+
+        nn.init.constant_(self.gate_proj.bias, 2.0)
 
     def forward(
         self, 
@@ -190,9 +191,8 @@ class SelectiveMHA(nn.Module):
         is_infer = not self.training
         is_prefill = is_infer and self.is_causal and cache is not None
 
-        # gate = torch.sigmoid(self.gate_proj(hidden_states))
-        # select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
-        select_gate = torch.sigmoid(self.gate_proj(hidden_states))
+        gate = torch.sigmoid(self.gate_proj(hidden_states))
+        select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
         select_gate = select_gate.transpose(1, 2).contiguous()
         if is_infer and attn_gate_threshold is not None:
             select_gate[select_gate < attn_gate_threshold] = 0.0
@@ -212,8 +212,7 @@ class SelectiveMHA(nn.Module):
             if attn_gate_threshold is not None:
                 valid_mask &= (select_gate >= attn_gate_threshold)
             if not valid_mask.any():
-                # hidden_states = self.out_proj(v * out_gate)
-                hidden_states = self.out_proj(v)
+                hidden_states = self.out_proj(v * out_gate)
                 return hidden_states
 
         q = self.q_proj(hidden_states)
@@ -240,8 +239,7 @@ class SelectiveMHA(nn.Module):
             v_aligned = v
             out = attn_weight @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
-        # hidden_states = self.out_proj(out * out_gate)
-        hidden_states = self.out_proj(out)
+        hidden_states = self.out_proj(out * out_gate)
         
         if is_prefill:
             cache.build_kv(k_rot, v_aligned, log_select_gate)
@@ -274,7 +272,7 @@ class SelectiveMHA(nn.Module):
             count_per_key = (scaled_weight > 0).sum(dim=2)
 
             num_bins = analysis_cfg.gate_attn_num_bins
-            gate_vals = select_gate  # (batch_size, num_heads, seq_len)
+            gate_vals = select_gate
             bin_idx = (gate_vals * num_bins).long().clamp(0, num_bins - 1)
             head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, seq_len).reshape(-1)
             flat_index = head_idx * num_bins + bin_idx.reshape(-1)
@@ -324,9 +322,8 @@ class SelectiveMHA(nn.Module):
             else:
                 _reset_cache(cache, gen_cfg.cache_update_interval)
         
-        # gate = torch.sigmoid(self.gate_proj(hidden_states))
-        # select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
-        select_gate = torch.sigmoid(self.gate_proj(hidden_states))
+        gate = torch.sigmoid(self.gate_proj(hidden_states))
+        select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
         valid_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
         select_gate = select_gate * valid_mask
         log_select_gate = torch.log(select_gate)
@@ -344,8 +341,7 @@ class SelectiveMHA(nn.Module):
         cache.update_kv(k_rot, v, log_select_gate)
 
         if cache.write_idx <= 1:
-            # return self.out_proj(v.view(batch_size, -1) * out_gate)
-            return self.out_proj(v.view(batch_size, -1))
+            return self.out_proj(v.view(batch_size, -1) * out_gate)
 
         cached_k = cache.k_rot[:, :, :cache.write_idx, :] 
         cached_v = cache.v[:, :, :cache.write_idx, :] 
@@ -391,5 +387,4 @@ class SelectiveMHA(nn.Module):
             bin_sum += step_sum.view(H, num_bins)
             bin_count += step_count.view(H, num_bins)
 
-        # return self.out_proj(out * out_gate)
-        return self.out_proj(out)
+        return self.out_proj(out * out_gate)
