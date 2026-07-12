@@ -149,7 +149,7 @@ def state_passing_backward_kernel(
 
     # Backward recurrence: propagate gradient from last chunk to first
     h_next_grad = tl.load(h_last_grad_ptr + head_state_element_ids * h_last_grad_head_state_element_stride, mask=mask, other=0.0)
-    for chunk_id in range(num_chunks - 1, 0, -1):
+    for chunk_id in range(num_chunks - 1, -1, -1):
         scale = tl.exp(tl.load(decay_last_ptr + chunk_id * decay_last_chunk_stride).to(tl.float32))
         h = tl.load(h_ptrs + chunk_id * h_chunk_stride, mask=mask, other=0.0).to(tl.float32)
         # Gradient for decay_last: sum(h * h_next_grad) * scale
@@ -160,18 +160,11 @@ def state_passing_backward_kernel(
         tl.store(h_grad_ptrs + chunk_id * h_grad_chunk_stride, h_next_grad, mask=mask)
         h_next_grad = scale * h_next_grad + h_grad_intra
 
-    # Handle the first chunk (chunk 0) and h_init_grad if present
-    scale0 = tl.exp(tl.load(decay_last_ptr + 0 * decay_last_chunk_stride).to(tl.float32))
-    h0 = tl.load(h_ptrs + 0 * h_chunk_stride, mask=mask, other=0.0).to(tl.float32)
-    chunk0_grad = tl.sum(h0 * h_next_grad) * scale0
-    tl.store(decay_last_grad_ptr + 0 * decay_last_grad_chunk_stride, chunk0_grad)
-    h_grad0_intra = tl.load(h_grad_ptrs + 0 * h_grad_chunk_stride, mask=mask, other=0.0).to(tl.float32)
-    tl.store(h_grad_ptrs + 0 * h_grad_chunk_stride, h_next_grad, mask=mask)
-    
     if HAS_H_INIT:
-        h_init_grad = scale0 * h_next_grad + h_grad0_intra
-        tl.store(h_init_grad_ptr + head_state_element_ids * h_init_grad_head_state_element_stride, h_init_grad, mask=mask)
-    
+        tl.store(h_init_grad_ptr + head_state_element_ids * h_init_grad_head_state_element_stride, h_next_grad, mask=mask)
+    else:
+        # No initial state -> decay_last_grad for chunk 0 must be zero
+        tl.store(decay_last_grad_ptr + 0 * decay_last_grad_chunk_stride, 0.0)
 
 ####################################################################################################
 
