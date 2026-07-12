@@ -227,7 +227,6 @@ def chunk_scan_chunk_state_backward_u_kernel(
     # Compute element indices for this tile
     chunk_tile_element_ids = chunk_tile_id * CHUNK_TILE_SIZE + tl.arange(0, CHUNK_TILE_SIZE)
     head_tile_element_ids = head_tile_id * HEAD_TILE_SIZE + tl.arange(0, HEAD_TILE_SIZE)
-    state_reduce_element_ids = tl.arange(0, STATE_DIM_ALIGNED if STATE_DIM_ALIGNED <= 128 else REDUCE_SIZE)
     chunk_reduce_element_ids = tl.arange(0, REDUCE_SIZE)
 
     # Advance raw pointers to the current batch, chunk, and head
@@ -252,15 +251,24 @@ def chunk_scan_chunk_state_backward_u_kernel(
     decay_cumsum_last = tl.load(decay_cumsum_ptr + (chunk_size - 1) * decay_chunk_element_stride)
     scale = tl.exp(tl.minimum(decay_cumsum_last - decay_cumsum_chunk_tile, 0.0))
 
-    # Accumulate contribution from B @ h_grad
-    B_ptrs = B_ptr + (chunk_tile_element_ids[:, None] * B_seq_stride + state_reduce_element_ids[None, :] * B_state_element_stride)
-    h_grad_ptrs = h_grad_ptr + (head_tile_element_ids[None, :] * h_grad_head_element_stride + state_reduce_element_ids[:, None] * h_grad_state_element_stride)
-    for state_offset in range(0, state_dim, REDUCE_SIZE):
-        B = tl.load(B_ptrs, mask=(chunk_tile_element_ids[:, None] < chunk_size_limit) & (state_reduce_element_ids[None, :] < state_dim - state_offset), other=0.0)
-        h_grad = tl.load(h_grad_ptrs, mask=(state_reduce_element_ids[:, None] < state_dim - state_offset) & (head_tile_element_ids[None, :] < head_dim), other=0.0)
-        acc += tl.dot(B, h_grad)
-        B_ptrs += REDUCE_SIZE * B_state_element_stride
-        h_grad_ptrs += REDUCE_SIZE * h_grad_state_element_stride
+    if STATE_DIM_ALIGNED <= 128:
+        state_ids = tl.arange(0, STATE_DIM_ALIGNED)
+        B_ptrs = B_ptr + (chunk_tile_element_ids[:, None] * B_seq_stride + state_ids[None, :] * B_state_element_stride)
+        h_grad_ptrs = h_grad_ptr + (head_tile_element_ids[None, :] * h_grad_head_element_stride + state_ids[:, None] * h_grad_state_element_stride)
+        B_tile = tl.load(B_ptrs, mask=(chunk_tile_element_ids[:, None] < chunk_size_limit) & (state_ids[None, :] < state_dim), other=0.0)
+        h_grad_tile = tl.load(h_grad_ptrs, mask=(state_ids[:, None] < state_dim) & (head_tile_element_ids[None, :] < head_dim), other=0.0)
+        acc = tl.dot(B_tile, h_grad_tile)
+    else:
+        state_reduce_element_ids = tl.arange(0, REDUCE_SIZE)
+        # Accumulate contribution from B @ h_grad
+        B_ptrs = B_ptr + (chunk_tile_element_ids[:, None] * B_seq_stride + state_reduce_element_ids[None, :] * B_state_element_stride)
+        h_grad_ptrs = h_grad_ptr + (head_tile_element_ids[None, :] * h_grad_head_element_stride + state_reduce_element_ids[:, None] * h_grad_state_element_stride)
+        for state_offset in range(0, state_dim, REDUCE_SIZE):
+            B = tl.load(B_ptrs, mask=(chunk_tile_element_ids[:, None] < chunk_size_limit) & (state_reduce_element_ids[None, :] < state_dim - state_offset), other=0.0)
+            h_grad = tl.load(h_grad_ptrs, mask=(state_reduce_element_ids[:, None] < state_dim - state_offset) & (head_tile_element_ids[None, :] < head_dim), other=0.0)
+            acc += tl.dot(B, h_grad)
+            B_ptrs += REDUCE_SIZE * B_state_element_stride
+            h_grad_ptrs += REDUCE_SIZE * h_grad_state_element_stride
 
     acc *= scale[:, None]
 
