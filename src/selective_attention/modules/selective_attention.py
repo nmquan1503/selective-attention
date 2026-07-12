@@ -324,7 +324,10 @@ class SelectiveMHA(nn.Module):
         
         gate = torch.sigmoid(self.gate_proj(hidden_states))
         select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
-        valid_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
+        if attn_gate_threshold is not None:
+            valid_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
+        else:
+            valid_mask = select_gate > 0.0
         select_gate = select_gate * valid_mask
         log_select_gate = torch.log(select_gate)
 
