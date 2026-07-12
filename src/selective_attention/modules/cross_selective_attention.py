@@ -53,10 +53,10 @@ class CrossSelectiveMHA(nn.Module):
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
         self.select_gate_proj = nn.Linear(dim, self.num_heads)
-        self.out_gate_proj = nn.Linear(dim, dim)
+        # self.out_gate_proj = nn.Linear(dim, dim)
 
         nn.init.constant_(self.select_gate_proj.bias, 2.0)
-        nn.init.constant_(self.out_gate_proj.bias, 2.0)
+        # nn.init.constant_(self.out_gate_proj.bias, 2.0)
 
     def forward(
         self, 
@@ -84,7 +84,7 @@ class CrossSelectiveMHA(nn.Module):
         is_prefill = is_infer and cache is not None
 
         select_gate = torch.sigmoid(self.select_gate_proj(context)).transpose(1, 2).contiguous()
-        out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
+        # out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(context)
@@ -129,7 +129,8 @@ class CrossSelectiveMHA(nn.Module):
         attn_weights = F.softmax(attn_matrix, dim=-1)
         out = attn_weights @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
-        hidden_states = self.out_proj(out * out_gate)
+        # hidden_states = self.out_proj(out * out_gate)
+        hidden_states = self.out_proj(out)
 
         if analysis_cfg is not None and stats is not None:
             if context_lengths is not None:
@@ -181,7 +182,7 @@ class CrossSelectiveMHA(nn.Module):
         batch_size = hidden_states.shape[0]
         device = hidden_states.device
         
-        out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
+        # out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
         q = self.q_proj(hidden_states)
         q = q.view(batch_size, self.num_heads, self.head_dim).unsqueeze(2)
         attn_matrix = (q @ cache.k.transpose(-2, -1)) * self.scale
@@ -189,7 +190,8 @@ class CrossSelectiveMHA(nn.Module):
         attn_weights = F.softmax(attn_matrix, dim=-1)
         out = attn_weights @ cache.v
         out = out.squeeze(2).view(batch_size, self.dim)
-        hidden_states = self.out_proj(out * out_gate)
+        # hidden_states = self.out_proj(out * out_gate)
+        hidden_states = self.out_proj(out)
 
         if analysis_cfg is not None and stats is not None:
             select_gate = torch.exp(cache.log_gate)
