@@ -426,6 +426,7 @@ def chunk_state_backward_B_kernel(
         delta_ptrs += delta_head_stride
         decay_cumsum_ptrs += decay_cumsum_head_stride
         decay_grad_from_B_ptrs += decay_grad_from_B_head_stride
+        decay_cumsum_ptr += decay_cumsum_head_stride
 
     # Store accumulated B_grad for this split
     B_grad_ptrs = B_grad_ptr + (chunk_tile_element_ids[:, None] * B_grad_seq_stride + state_tile_element_ids[None, :] * B_grad_state_dim)
