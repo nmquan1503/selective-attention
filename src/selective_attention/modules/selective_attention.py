@@ -281,18 +281,23 @@ class SelectiveMHA(nn.Module):
             head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, seq_len).reshape(-1)
             flat_index = head_idx * num_bins + bin_idx.reshape(-1)
             
-            bin_sum_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
-            bin_count_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            bin_attn_mass_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            bin_attn_count_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            bin_gate_freq_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+
+            bin_attn_mass_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
+            bin_attn_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+            gate_one = torch.ones_like(flat_index, dtype=torch.float32)
+            bin_gate_freq_flat.scatter_add_(0, flat_index, gate_one)
             
-            bin_sum_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
-            bin_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
-            
-            bin_sum = bin_sum_flat.view(self.num_heads, num_bins)
-            bin_count = bin_count_flat.view(self.num_heads, num_bins)
-            
+            bin_attn_mass = bin_attn_mass_flat.view(self.num_heads, num_bins)
+            bin_attn_count = bin_attn_count_flat.view(self.num_heads, num_bins)
+            bin_gate_freq = bin_gate_freq_flat.view(self.num_heads, num_bins)
+                
             stats[f"{'causal' if self.is_causal else 'non_causal'}_attn_gate_analysis"] = {
-                "sum": bin_sum,
-                "count": bin_count
+                "attn_mass": bin_attn_mass,
+                "attn_count": bin_attn_count,
+                "gate_freq": bin_gate_freq
             }
 
         return hidden_states
@@ -373,8 +378,9 @@ class SelectiveMHA(nn.Module):
             scaled_weight = attn_weight * seq_len
 
             num_bins = analysis_cfg.gate_attn_num_bins
-            bin_sum = stats["causal_attn_gate_analysis"]["sum"]
-            bin_count = stats["causal_attn_gate_analysis"]["count"]
+            attn_mass = stats["causal_attn_gate_analysis"]["attn_mass"]
+            attn_count = stats["causal_attn_gate_analysis"]["attn_count"]
+            gate_freq = stats["causal_attn_gate_analysis"]["gate_freq"]
 
             gate_sub = torch.exp(cached_log_gate[:, :, :seq_len-1])
             weight_sub = scaled_weight[:, :, :seq_len-1]
@@ -387,15 +393,19 @@ class SelectiveMHA(nn.Module):
             mask_valid = (gate_sub > 0).float()
             sum_flat = (weight_sub * mask_valid).reshape(-1)
             count_flat = mask_valid.reshape(-1)
+            gate_ones = mask_valid.reshape(-1)
 
-            step_sum = torch.zeros(H * num_bins, dtype=torch.float32, device=device)
-            step_count = torch.zeros(H * num_bins, dtype=torch.float32, device=device)
+            step_attn_mass = torch.zeros(H * num_bins, dtype=torch.float32, device=device)
+            step_attn_count = torch.zeros(H * num_bins, dtype=torch.float32, device=device)
+            step_gate_freq = torch.zeros(H * num_bins, dtype=torch.float32, device=device)
 
-            step_sum.scatter_add_(0, flat_index, sum_flat)
-            step_count.scatter_add_(0, flat_index, count_flat)
+            step_attn_mass.scatter_add_(0, flat_index, sum_flat)
+            step_attn_count.scatter_add_(0, flat_index, count_flat)
+            step_gate_freq.scatter_add_(0, flat_index, gate_ones)
 
-            bin_sum += step_sum.view(H, num_bins)
-            bin_count += step_count.view(H, num_bins)
+            attn_mass += step_attn_mass.view(H, num_bins)
+            attn_count += step_attn_count.view(H, num_bins)
+            gate_freq += step_gate_freq.view(H, num_bins)
 
         # return self.out_proj(out * out_gate)
         return self.out_proj(out)

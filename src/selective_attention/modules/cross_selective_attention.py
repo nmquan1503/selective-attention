@@ -152,15 +152,19 @@ class CrossSelectiveMHA(nn.Module):
             head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, context_len).reshape(-1)
             flat_index = head_idx * num_bins + bin_idx.reshape(-1)
 
-            bin_sum_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
-            bin_count_flat = torch.zeros_like(bin_sum_flat)
+            bin_attn_mass_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            bin_attn_count_flat = torch.zeros_like(bin_attn_mass_flat)
+            bin_gate_freq_flat = torch.zeros_like(bin_attn_mass_flat)
 
-            bin_sum_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
-            bin_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+            bin_attn_mass_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
+            bin_attn_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+            gate_ones = torch.ones_like(flat_index, dtype=torch.float32)
+            bin_gate_freq_flat.scatter_add_(0, flat_index, gate_ones)
 
             stats["cross_attn_gate_analysis"] = {
-                "sum": bin_sum_flat.view(self.num_heads, num_bins),
-                "count": bin_count_flat.view(self.num_heads, num_bins)
+                "attn_mass": bin_attn_mass_flat.view(self.num_heads, num_bins),
+                "attn_count": bin_attn_count_flat.view(self.num_heads, num_bins),
+                "gate_freq": bin_gate_freq_flat.view(self.num_heads, num_bins)
             }
 
         return hidden_states
@@ -209,14 +213,18 @@ class CrossSelectiveMHA(nn.Module):
             head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, K).reshape(-1)
             flat_index = head_idx * num_bins + bin_idx.reshape(-1)
 
-            step_sum = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
-            step_count = torch.zeros_like(step_sum)
+            step_attn_mass = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+            step_attn_count = torch.zeros_like(step_attn_mass)
+            step_gate_freq = torch.zeros_like(step_attn_mass)
 
-            step_sum.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
-            step_count.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+            step_attn_mass.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
+            step_attn_count.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+            gate_ones = torch.ones_like(flat_index, dtype=torch.float32)
+            step_gate_freq.scatter_add_(0, flat_index, gate_ones)
 
             key = "cross_attn_gate_analysis"
-            stats[key]["sum"] += step_sum.view(self.num_heads, num_bins)
-            stats[key]["count"] += step_count.view(self.num_heads, num_bins)
+            stats[key]["attn_mass"] += step_attn_mass.view(self.num_heads, num_bins)
+            stats[key]["attn_count"] += step_attn_count.view(self.num_heads, num_bins)
+            stats[key]["gate_freq"] += step_gate_freq.view(self.num_heads, num_bins)
 
         return hidden_states
