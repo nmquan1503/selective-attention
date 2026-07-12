@@ -85,13 +85,6 @@ class CrossSelectiveMHA(nn.Module):
 
         select_gate = torch.sigmoid(self.select_gate_proj(context)).transpose(1, 2).contiguous()
         out_gate = torch.sigmoid(self.out_gate_proj(hidden_states))
-        select_gate[:, :, 0] = 1
-        if context_lengths is not None:
-            valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
-            if not is_infer:
-                select_gate = select_gate * valid_mask[:, None, :]
-            else:
-                select_gate *= valid_mask[:, None, :]
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(context)
@@ -101,6 +94,13 @@ class CrossSelectiveMHA(nn.Module):
         v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
         if is_prefill:
+            select_gate[:, :, 0] = 1
+            if context_lengths is not None:
+                valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
+                if not is_infer:
+                    select_gate = select_gate * valid_mask[:, None, :]
+                else:
+                    select_gate *= valid_mask[:, None, :]
             if attn_gate_threshold is not None:
                 select_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
                 select_mask[:, :, 0] = True
@@ -114,12 +114,18 @@ class CrossSelectiveMHA(nn.Module):
             cache.log_gate = log_select_gate
         else:
             log_select_gate = torch.log(select_gate)
+            if context_lengths is not None:
+                valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
+                log_select_gate = log_select_gate.masked_fill(
+                    ~valid_mask[:, None, :],
+                    float("-inf"),
+                )
         
         attn_matrix = (q @ k.transpose(-2, -1)) * self.scale
         if is_infer:
-            attn_matrix += log_select_gate.unsqueeze(2)
+            attn_matrix[:, :, :, 1:] += log_select_gate[:, :, 1:].unsqueeze(2)
         else:
-            attn_matrix = attn_matrix + log_select_gate.unsqueeze(2)
+            attn_matrix[:, :, :, 1:] = attn_matrix[:, :, :, 1:] + log_select_gate[:, :, 1:].unsqueeze(2)
         attn_weights = F.softmax(attn_matrix, dim=-1)
         out = attn_weights @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
