@@ -121,9 +121,9 @@ class Seq2SeqLM(nn.Module):
         input_ids: torch.Tensor,
         lengths: torch.Tensor,
         decoder_input_ids: torch.Tensor,
-        enc_attn_gate_thresholds: List[float] | None = None,
-        attn_gate_thresholds: List[float] | None = None,
-        cross_attn_gate_thresholds: List[float] | None = None,
+        enc_attn_gate_thresholds: torch.Tensor | None = None,
+        attn_gate_thresholds: torch.Tensor | None = None,
+        cross_attn_gate_thresholds: torch.Tensor | None = None,
         cache: list[CrossBlockCache] | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: List[Dict] | None = None

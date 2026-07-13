@@ -173,7 +173,7 @@ class SelectiveMHA(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float | None = None,
+        attn_gate_threshold: torch.Tensor | None = None,
         cache: SelectiveAttnCache | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: Dict | None = None
@@ -182,6 +182,7 @@ class SelectiveMHA(nn.Module):
         Args:
             hidden_states: (batch_size, seq_len, dim)
             lengths: (batch_size,)
+            attn_gate_threshold: (num_heads,)
         
         Returns:
             hidden_states: (batch_size, seq_len, dim)
@@ -195,7 +196,7 @@ class SelectiveMHA(nn.Module):
         select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
         select_gate = select_gate.transpose(1, 2).contiguous()
         if is_infer and attn_gate_threshold is not None:
-            select_gate[select_gate < attn_gate_threshold] = 0.0
+            select_gate[select_gate < attn_gate_threshold[None, :, None]] = 0.0
 
         if lengths is not None:
             pad_mask = torch.arange(seq_len, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
@@ -210,7 +211,7 @@ class SelectiveMHA(nn.Module):
         if is_infer:
             valid_mask = select_gate > 0.0
             if attn_gate_threshold is not None:
-                valid_mask &= (select_gate >= attn_gate_threshold)
+                valid_mask &= (select_gate >= attn_gate_threshold[None, :, None])
             if not valid_mask.any():
                 hidden_states = self.out_proj(v * out_gate)
                 return hidden_states
@@ -315,7 +316,7 @@ class SelectiveMHA(nn.Module):
 
         batch_size, _ = hidden_states.shape
         device = hidden_states.device
-        attn_gate_threshold = gen_cfg.attn_gate_thresholds[self.layer_idx]
+        attn_gate_threshold = gen_cfg.attn_gate_thresholds[self.layer_idx] if gen_cfg.attn_gate_thresholds is not None else None
 
         if state.step % gen_cfg.cache_update_interval == 0:
             if cache.k_rot is None:
@@ -329,7 +330,7 @@ class SelectiveMHA(nn.Module):
         select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
 
         if attn_gate_threshold is not None:
-            valid_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
+            valid_mask = (select_gate >= attn_gate_threshold[None, :]) & (select_gate > 0.0)
         else:
             valid_mask = select_gate > 0.0
         select_gate = select_gate * valid_mask

@@ -79,7 +79,7 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor | None = None,
-        attn_gate_thresholds: List[float] | None = None,
+        attn_gate_thresholds: torch.Tensor | None = None,
         cache: list[CausalBlockCache] | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: List[dict] | None = None
@@ -88,6 +88,7 @@ class CausalLM(nn.Module):
         Args:
             input_ids: (batch_size, seq_len)
             lengths: (batch_size,)
+            attn_gate_thresholds: (num_layers, num_heads)
         
         Returns:
             (batch_size, seq_len, vocab_size)

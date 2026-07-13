@@ -61,7 +61,7 @@ class CrossSelectiveMHA(nn.Module):
         hidden_states: torch.Tensor, 
         context: torch.Tensor,
         context_lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float | None = None,
+        attn_gate_threshold: torch.Tensor | None = None,
         cache: CrossSelectiveAttnCache | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: dict | None = None
@@ -71,6 +71,7 @@ class CrossSelectiveMHA(nn.Module):
             hidden_states: (batch_size, seq_len, model_dim)
             context: (batch_size, context_len, model_dim)
             context_lengths: (batch_size,)
+            attn_gate_threshold: (num_heads,)
 
         Returns:
             hidden_states: (batch_size, seq_len, model_dim)
@@ -99,7 +100,7 @@ class CrossSelectiveMHA(nn.Module):
                 else:
                     select_gate *= valid_mask[:, None, :]
             if attn_gate_threshold is not None:
-                select_mask = (select_gate >= attn_gate_threshold) & (select_gate > 0.0)
+                select_mask = (select_gate >= attn_gate_threshold[None, :, None]) & (select_gate > 0.0)
                 select_mask[:, :, 0] = True
                 select_gate = compress(select_gate.unsqueeze(-1), select_mask).squeeze(-1)
                 k = compress(k, select_mask)

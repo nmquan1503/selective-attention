@@ -50,8 +50,8 @@ class CrossBlock(nn.Module):
         context: torch.Tensor,
         context_lengths: torch.Tensor,
         ssm_hiddens: torch.Tensor,
-        self_attn_gate_threshold: float | None = None,
-        cross_attn_gate_threshold: float | None = None,
+        self_attn_gate_threshold: torch.Tensor | None = None,
+        cross_attn_gate_threshold: torch.Tensor | None = None,
         cache: CrossBlockCache | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: dict | None = None
@@ -62,6 +62,8 @@ class CrossBlock(nn.Module):
             context: (batch_size, context_len, model_dim)
             context_lengths: (batch_size,)
             ssm_hiddens: (batch_size, inner_dim, state_dim)
+            self_attn_gate_threshold: (num_heads,)
+            cross_attn_gate_threshold: (num_heads,)
         
         Returns: 
             hidden_states: (batch_size, seq_len, model_dim)

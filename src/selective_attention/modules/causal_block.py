@@ -48,7 +48,7 @@ class CausalBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: float | None = None,
+        attn_gate_threshold: torch.Tensor | None = None,
         cache: CausalBlockCache | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: dict | None = None
@@ -57,6 +57,7 @@ class CausalBlock(nn.Module):
         Args:
             hidden_states: (batch_size, seq_len, model_dim)
             lengths: (batch_size,)
+            attn_gate_theshold: (num_heads,)
         
         Returns: 
             hidden_states: (batch_size, seq_len, model_dim)
