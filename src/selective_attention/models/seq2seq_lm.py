@@ -108,9 +108,18 @@ class Seq2SeqLM(nn.Module):
             eos_token_id=1,
             pad_token_id=2,
             max_new_tokens=2,
-            enc_attn_gate_thresholds=[0.5] * self.cfg.num_layers,
-            attn_gate_thresholds=[0.5] * self.cfg.num_layers,
-            cross_attn_gate_thresholds=[0.5] * self.cfg.num_layers
+            enc_attn_gate_thresholds=torch.full(
+                (self.cfg.num_layers, self.cfg.model_dim // self.cfg.head_dim), 
+                0.5, device=self.cfg.device
+            ),
+            attn_gate_thresholds=torch.full(
+                (self.cfg.num_layers, self.cfg.model_dim // self.cfg.head_dim), 
+                0.5, device=self.cfg.device
+            ),
+            cross_attn_gate_thresholds=torch.full(
+                (self.cfg.num_layers, self.cfg.model_dim // self.cfg.head_dim), 
+                0.5, device=self.cfg.device
+            )
         ))
 
         if str(device) == "cuda":
