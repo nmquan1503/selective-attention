@@ -168,13 +168,22 @@ class CausalLM(nn.Module):
         state = InferenceState(lengths)
         stats = None
         if analysis_cfg is not None:
-            stats = [{} for _ in range(self.cfg.num_layers)]
+            layers_stats = [{} for _ in range(self.cfg.num_layers)]
+            overall_stats = {}
+            stats = {"layers": layers_stats, "overall": overall_stats}
 
         if gen_cfg.attn_gate_thresholds is None:
             gen_cfg.attn_gate_thresholds = [0.0] * self.cfg.num_layers
 
         last_indices = lengths - 1
-        logits = self.forward(input_ids, lengths, gen_cfg.attn_gate_thresholds, cache, analysis_cfg, stats)
+        logits = self.forward(
+            input_ids, 
+            lengths, 
+            gen_cfg.attn_gate_thresholds, 
+            cache, 
+            analysis_cfg, 
+            stats["layers"] if stats is not None else None
+        )
         logits = logits[torch.arange(batch_size, device=device), last_indices]
         
         seq_ids = torch.full(
@@ -196,7 +205,14 @@ class CausalLM(nn.Module):
             if finished.all():
                 break
 
-            logits = self.step(next_token, cache, state, gen_cfg, analysis_cfg, stats)
+            logits = self.step(
+                next_token, 
+                cache, 
+                state, 
+                gen_cfg, 
+                analysis_cfg, 
+                stats["layers"] if stats is not None else None
+            )
             state.update()
 
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
@@ -204,6 +220,16 @@ class CausalLM(nn.Module):
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
 
         if analysis_cfg is not None:
+            real_input_len = lengths.sum().item()
+            total_tokens_per_layer = real_input_len + state.step + 1
+            total_possible = total_tokens_per_layer * self.cfg.num_layers
+
+            total_kept = sum(
+                cache[i].attn_cache.write_idx
+                for i in range(self.cfg.num_layers)
+            )
+            stats["overall"]["token_kept_ratio"] = total_kept / total_possible
+
             return seq_ids, stats
 
         return seq_ids

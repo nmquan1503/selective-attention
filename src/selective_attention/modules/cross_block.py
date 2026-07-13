@@ -146,6 +146,7 @@ class CrossBlock(nn.Module):
         hidden_states = self.cross_mha.step(
             hidden_states=hidden_states,
             cache=cache.cross_attn_cache,
+            gen_cfg=gen_cfg,
             analysis_cfg=analysis_cfg,
             stats=stats
         )

@@ -128,7 +128,7 @@ class CrossSelectiveMHA(nn.Module):
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
         hidden_states = self.out_proj(out)
 
-        if analysis_cfg is not None and stats is not None:
+        if analysis_cfg is not None and stats is not None and attn_gate_threshold is None:
             if context_lengths is not None:
                 scale = context_lengths.view(batch_size, 1, 1, 1).to(dtype=attn_weights.dtype)
             else:
@@ -169,6 +169,7 @@ class CrossSelectiveMHA(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         cache: CrossSelectiveAttnCache,
+        gen_cfg: GenerationConfig,
         analysis_cfg: AnalysisConfig | None = None,
         stats: dict | None = None
     ):
@@ -181,6 +182,7 @@ class CrossSelectiveMHA(nn.Module):
         """
         batch_size = hidden_states.shape[0]
         device = hidden_states.device
+        attn_gate_threshold = gen_cfg.attn_gate_thresholds[self.layer_idx] if gen_cfg.attn_gate_thresholds is not None else None
         
         q = self.q_proj(hidden_states)
         q = q.view(batch_size, self.num_heads, self.head_dim).unsqueeze(2)
@@ -191,7 +193,7 @@ class CrossSelectiveMHA(nn.Module):
         out = out.squeeze(2).view(batch_size, self.dim)
         hidden_states = self.out_proj(out)
 
-        if analysis_cfg is not None and stats is not None:
+        if analysis_cfg is not None and stats is not None and attn_gate_threshold is None:
             select_gate = torch.exp(cache.log_gate)
             K = select_gate.shape[2]
             scale = (select_gate > 0).sum(dim=-1, keepdim=True).float()

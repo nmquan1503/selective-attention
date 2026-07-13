@@ -232,7 +232,8 @@ class Seq2SeqLM(nn.Module):
             lengths=torch.ones(batch_size, dtype=torch.long, device=device)
         )
         if analysis_cfg is not None:
-            stats = [{} for _ in range(self.cfg.num_layers)]
+            layers_stats = [{} for _ in range(self.cfg.num_layers)]
+            stats = {"layers": layers_stats, "overall": {}}
         else:
             stats = None
 
@@ -253,7 +254,7 @@ class Seq2SeqLM(nn.Module):
             cross_attn_gate_thresholds=gen_cfg.cross_attn_gate_thresholds,
             cache=cache,
             analysis_cfg=analysis_cfg,
-            stats=stats
+            stats=stats["layers"] if stats is not None else None
         ).squeeze(1)
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
         for _ in range(gen_cfg.max_new_tokens - 1):
@@ -264,7 +265,14 @@ class Seq2SeqLM(nn.Module):
             if finished.all():
                 break
         
-            logits = self.step(next_token, cache, state, gen_cfg, analysis_cfg, stats)
+            logits = self.step(
+                next_token, 
+                cache, 
+                state, 
+                gen_cfg, 
+                analysis_cfg, 
+                stats["layers"] if stats is not None else None
+            )
             state.update()
         
         eos_mask = (seq_ids == gen_cfg.eos_token_id)
@@ -272,6 +280,25 @@ class Seq2SeqLM(nn.Module):
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
 
         if analysis_cfg is not None:
+            decoder_len = 2 + state.step
+
+            real_input_len = lengths.sum().item()
+            total_possible_cross = real_input_len * self.cfg.num_layers
+            total_possible_self  = decoder_len * self.cfg.num_layers
+            total_possible = total_possible_cross + total_possible_self
+
+            total_kept = 0
+            for layer_cache in cache:
+                if layer_cache.cross_attn_cache.k is not None:
+                    cross_kept = layer_cache.cross_attn_cache.k.shape[2]
+                else:
+                    cross_kept = 0
+                self_kept = layer_cache.attn_cache.write_idx
+                total_kept += cross_kept + self_kept
+
+            token_kept_ratio = total_kept / total_possible
+            stats["overall"]["token_kept_ratio"] = token_kept_ratio
+
             return seq_ids, stats
 
         return seq_ids

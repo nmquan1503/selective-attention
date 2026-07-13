@@ -244,9 +244,7 @@ class SelectiveMHA(nn.Module):
         if is_prefill:
             cache.build_kv(k_rot, v_aligned, log_select_gate)
         
-        if analysis_cfg is not None and stats is not None:
-            if is_compressed:
-                raise ValueError("")
+        if analysis_cfg is not None and stats is not None  and attn_gate_threshold is None:
             if self.is_causal:
                 scale = torch.arange(1, seq_len + 1, device=device).view(1, 1, seq_len, 1)
             elif lengths is not None:
@@ -367,7 +365,7 @@ class SelectiveMHA(nn.Module):
         if not valid_mask.any():
             cache.write_idx -= 1
 
-        if analysis_cfg is not None and stats is not None:
+        if analysis_cfg is not None and stats is not None and attn_gate_threshold is None:
             seq_len = cache.write_idx
             scaled_weight = attn_weight * seq_len
 
