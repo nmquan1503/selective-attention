@@ -173,8 +173,8 @@ class CausalLM(nn.Module):
             overall_stats = {}
             stats = {"layers": layers_stats, "overall": overall_stats}
 
-        if gen_cfg.attn_gate_thresholds is None:
-            gen_cfg.attn_gate_thresholds = [0.0] * self.cfg.num_layers
+        # if gen_cfg.attn_gate_thresholds is None:
+        #     gen_cfg.attn_gate_thresholds = [0.0] * self.cfg.num_layers
 
         last_indices = lengths - 1
         logits = self.forward(
