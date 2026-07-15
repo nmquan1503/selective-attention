@@ -7,16 +7,19 @@ class RMSNorm(nn.Module):
         self, 
         dim: int, 
         num_groups: int | None = None,
-        eps: float = 1e-6
+        eps: float = 1e-6,
+        elementwise_affine: bool = True
     ):
         super().__init__()
         self.eps = eps
         self.num_groups = num_groups
+        self.elementwise_affine = elementwise_affine
 
-        if num_groups is None:
-            self.weight = nn.Parameter(torch.zeros(dim))
-        else:
-            self.weight = nn.Parameter(torch.zeros(num_groups, dim))
+        if elementwise_affine:
+            if num_groups is None:
+                self.weight = nn.Parameter(torch.zeros(dim))
+            else:
+                self.weight = nn.Parameter(torch.zeros(num_groups, dim))
 
     def _norm(self, x: torch.Tensor):
         """
@@ -37,5 +40,6 @@ class RMSNorm(nn.Module):
                 x: (..., num_groups, dim)
         """
         output = self._norm(x.float())
-        output = output * (1.0 + self.weight.float())
+        if self.elementwise_affine:
+            output = output * (1.0 + self.weight.float())
         return output.type_as(x)
