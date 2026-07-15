@@ -25,8 +25,9 @@ class RoPE(nn.Module):
         positions: (seq_len,) | (batch_size,)
         """
         angles = positions.unsqueeze(-1) * self.inv_freq.unsqueeze(0)
-        cos = torch.cos(angles).repeat_interleave(2, dim=-1)
-        sin = torch.sin(angles).repeat_interleave(2, dim=-1)
+        angles = torch.cat([angles, angles], dim=-1)
+        cos = torch.cos(angles)
+        sin = torch.sin(angles)
         return cos, sin
 
     def forward(
