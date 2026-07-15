@@ -163,9 +163,8 @@ class SelectiveMHA(nn.Module):
 
         self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.rope = RoPE(self.head_dim)
-        self.norm = RMSNorm(self.head_dim, elementwise_affine=False)
-        self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
 
@@ -224,9 +223,6 @@ class SelectiveMHA(nn.Module):
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-
-        q = self.norm(q)
-        k = self.norm(k)
 
         positions = torch.arange(seq_len, device=device)
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
@@ -348,9 +344,6 @@ class SelectiveMHA(nn.Module):
         q = q.view(batch_size, self.num_heads, self.head_dim)
         k = k.view(batch_size, self.num_heads, self.head_dim)
         v = v.view(batch_size, self.num_heads, self.head_dim)
-
-        q = self.norm(q)
-        k = self.norm(k)
         
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
         
