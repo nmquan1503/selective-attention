@@ -172,8 +172,6 @@ class SelectiveMHA(nn.Module):
         self.out_proj = nn.Linear(dim, dim)
 
         nn.init.constant_(self.gate_proj.bias, 2.0)
-        nn.init.constant_(self.q_scale_proj.bias, 2.0)
-        nn.init.constant_(self.k_scale_proj.bias, 2.0)
 
     def forward(
         self, 
@@ -225,14 +223,17 @@ class SelectiveMHA(nn.Module):
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
 
-        q_scale = torch.sigmoid(self.q_scale_proj(hidden_states))
-        k_scale = torch.sigmoid(self.k_scale_proj(hidden_states))
-        q = self.norm(q) * q_scale
-        k = self.norm(k) * k_scale
-
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+
+        q_scale = torch.sigmoid(self.q_scale_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k_scale = torch.sigmoid(self.k_scale_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        q_scale = 0.8 + 0.4 * q_scale
+        k_scale = 0.8 + 0.4 * k_scale
+        q = self.norm(q) * q_scale
+        k = self.norm(k) * k_scale
 
         positions = torch.arange(seq_len, device=device)
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
@@ -351,14 +352,17 @@ class SelectiveMHA(nn.Module):
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
 
-        q_scale = torch.sigmoid(self.q_scale_proj(hidden_states))
-        k_scale = torch.sigmoid(self.k_scale_proj(hidden_states))
-        q = self.norm(q) * q_scale
-        k = self.norm(k) * k_scale
-
         q = q.view(batch_size, self.num_heads, self.head_dim)
         k = k.view(batch_size, self.num_heads, self.head_dim)
         v = v.view(batch_size, self.num_heads, self.head_dim)
+
+        q_scale = torch.sigmoid(self.q_scale_proj(hidden_states)).view(batch_size, self.num_heads, self.head_dim)
+        k_scale = torch.sigmoid(self.k_scale_proj(hidden_states)).view(batch_size, self.num_heads, self.head_dim)
+        
+        q_scale = 0.8 + 0.4 * q_scale
+        k_scale = 0.8 + 0.4 * k_scale
+        q = self.norm(q) * q_scale
+        k = self.norm(k) * k_scale
         
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
         
