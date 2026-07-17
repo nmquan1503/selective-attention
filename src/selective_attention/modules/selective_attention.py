@@ -165,11 +165,15 @@ class SelectiveMHA(nn.Module):
         self.rope = RoPE(self.head_dim)
         self.norm = RMSNorm(self.head_dim, elementwise_affine=False)
         self.q_proj = nn.Linear(dim, dim)
-        self.q_scale_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
-        self.k_scale_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
+        self.q_scale_proj = nn.Linear(dim, dim)
+        self.q_scale_min = nn.Parameter(torch.full((self.num_heads, self.head_dim), 0.8))
+        self.q_scale_range = nn.Parameter(torch.full((self.num_heads, self.head_dim), 0.4))
+        self.k_scale_proj = nn.Linear(dim, dim)
+        self.k_scale_min = nn.Parameter(torch.full((self.num_heads, self.head_dim), 0.8))
+        self.k_scale_range = nn.Parameter(torch.full((self.num_heads, self.head_dim), 0.4))
 
         nn.init.constant_(self.gate_proj.bias, 2.0)
 
@@ -227,11 +231,14 @@ class SelectiveMHA(nn.Module):
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
-        q_scale = torch.sigmoid(self.q_scale_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k_scale = torch.sigmoid(self.k_scale_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        q_scale = 0.8 + 0.4 * q_scale
-        k_scale = 0.8 + 0.4 * k_scale
+        q_scale_min = F.softplus(self.q_scale_min)
+        q_scale_range = F.softplus(self.q_scale_range)
+        q_scale = q_scale_min + q_scale_range * torch.sigmoid(self.q_scale_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k_scale_min = F.softplus(self.k_scale_min)
+        k_scale_range = F.softplus(self.k_scale_range)
+        k_scale = k_scale_min + k_scale_range * torch.sigmoid(self.k_scale_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        log_gate_scale = (q_scale_min + q_scale_range) * (k_scale_min + k_scale_range) * 1.5
+
         q = self.norm(q) * q_scale
         k = self.norm(k) * k_scale
 
@@ -242,7 +249,7 @@ class SelectiveMHA(nn.Module):
         if is_compressed:
             select_gate = compress(select_gate.unsqueeze(-1), valid_mask).squeeze(-1)
         
-        log_select_gate = torch.log(select_gate)
+        log_select_gate = torch.log(select_gate) * log_gate_scale
         attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 
         if is_compressed:
@@ -356,13 +363,17 @@ class SelectiveMHA(nn.Module):
         k = k.view(batch_size, self.num_heads, self.head_dim)
         v = v.view(batch_size, self.num_heads, self.head_dim)
 
-        q_scale = torch.sigmoid(self.q_scale_proj(hidden_states)).view(batch_size, self.num_heads, self.head_dim)
-        k_scale = torch.sigmoid(self.k_scale_proj(hidden_states)).view(batch_size, self.num_heads, self.head_dim)
-        
-        q_scale = 0.8 + 0.4 * q_scale
-        k_scale = 0.8 + 0.4 * k_scale
+        q_scale_min = F.softplus(self.q_scale_min)
+        q_scale_range = F.softplus(self.q_scale_range)
+        q_scale = q_scale_min + q_scale_range * torch.sigmoid(self.q_scale_proj(hidden_states)).view(batch_size, self.num_heads, self.head_dim)
+        k_scale_min = F.softplus(self.k_scale_min)
+        k_scale_range = F.softplus(self.k_scale_range)
+        k_scale = k_scale_min + k_scale_range * torch.sigmoid(self.k_scale_proj(hidden_states)).view(batch_size, self.num_heads, self.head_dim)
+        log_gate_scale = (q_scale_min + q_scale_range) * (k_scale_min + k_scale_range) * 1.5
+
         q = self.norm(q) * q_scale
         k = self.norm(k) * k_scale
+        log_select_gate *= log_gate_scale
         
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
         
