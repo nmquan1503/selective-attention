@@ -31,7 +31,6 @@ def _build_attn_matrix(
     valid_mask: torch.Tensor | None = None,
     is_causal: bool = False,
     is_infer: bool = False,
-    tanh_c: float | None = None
 ):
     """
     Args:
@@ -56,8 +55,6 @@ def _build_attn_matrix(
         if not is_compressed:
             attn_matrix = torch.matmul(q, k.transpose(-2, -1))
             attn_matrix.mul_(scale)
-            if tanh_c is not None and tanh_c > 0:
-                attn_matrix = tanh_c * torch.tanh(attn_matrix / tanh_c)
             if is_causal:
                 causal_mask = torch.triu(
                     torch.ones(seq_len, seq_len, dtype=torch.bool, device=device),
@@ -75,9 +72,6 @@ def _build_attn_matrix(
             k = k[:, :, :-1, :]
             attn_matrix[:, :, :, -1] = self_score
             attn_matrix.mul_(scale)
-
-            if tanh_c is not None:
-                attn_matrix = tanh_c * torch.tanh(attn_matrix / tanh_c)
             
             if is_causal:
                 causal_mask = key_pos >= pos_idx.unsqueeze(-1)
@@ -92,9 +86,6 @@ def _build_attn_matrix(
     else:
         attn_matrix = torch.matmul(q, k.transpose(-2, -1))
         attn_matrix = attn_matrix * scale
-
-        if tanh_c is not None:
-            attn_matrix = tanh_c * torch.tanh(attn_matrix / tanh_c)
 
         if is_causal:
             causal_mask = torch.triu(
@@ -169,7 +160,6 @@ class SelectiveMHA(nn.Module):
         self.head_dim = head_dim
         self.is_causal = is_causal
         self.scale = self.head_dim ** -0.5
-        self.tanh_c = 4.0
 
         self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.rope = RoPE(self.head_dim)
@@ -178,6 +168,8 @@ class SelectiveMHA(nn.Module):
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
         
+        self.register_buffer("score_std_ema", torch.zeros(self.num_heads))
+
         nn.init.constant_(self.gate_proj.bias, 2.0)
 
     def forward(
@@ -237,11 +229,38 @@ class SelectiveMHA(nn.Module):
         positions = torch.arange(seq_len, device=device)
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
 
-        attn_matrix, k_rot, is_compressed = _build_attn_matrix(q_rot, k_rot, self.scale, valid_mask, self.is_causal, is_infer, tanh_c=self.tanh_c)
+        attn_matrix, k_rot, is_compressed = _build_attn_matrix(q_rot, k_rot, self.scale, valid_mask, self.is_causal, is_infer)
+        
+        if self.training:
+            valid_attention_score_mask = attn_matrix != float("-inf")
+            valid_attention_score_count = valid_attention_score_mask.sum(dim=(0, 2, 3)).float()
+            valid_attention_scores = attn_matrix.masked_fill(
+                ~valid_attention_score_mask, 0.0
+            )
+            attention_score_sum = valid_attention_scores.sum(dim=(0, 2, 3))
+            attention_score_squared_sum = valid_attention_scores.square().sum(dim=(0, 2, 3))
+            head_attention_score_mean = (
+                attention_score_sum / valid_attention_score_count.clamp(min=1)
+            )
+            head_attention_score_variance = (
+                attention_score_squared_sum / valid_attention_score_count.clamp(min=1)
+                - head_attention_score_mean.square()
+            )
+            head_attention_score_std = head_attention_score_variance.clamp(min=0).sqrt()
+            with torch.no_grad():
+                self.score_std_ema.mul_(0.9).add_(
+                    head_attention_score_std,
+                    alpha=0.1,
+                )
+            
         if is_compressed:
             select_gate = compress(select_gate.unsqueeze(-1), valid_mask).squeeze(-1)
         
-        log_select_gate = torch.log(select_gate) * self.tanh_c / 2
+        log_select_gate = torch.log(select_gate)
+        if is_infer:
+            log_select_gate *= self.score_std_ema[None, :, None] * 1.5
+        else:
+            log_select_gate *= head_attention_score_std[None, :, None] * 1.5
         attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 
         if is_compressed:
@@ -345,7 +364,7 @@ class SelectiveMHA(nn.Module):
         else:
             valid_mask = select_gate > 0.0
         select_gate = select_gate * valid_mask
-        log_select_gate = torch.log(select_gate) * self.tanh_c / 2
+        log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :] * 1.5
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -368,7 +387,6 @@ class SelectiveMHA(nn.Module):
 
         attn_matrix = (q_rot.unsqueeze(2) @ cached_k.transpose(-2, -1)).squeeze(2)
         attn_matrix.mul_(self.scale)
-        attn_matrix = self.tanh_c * torch.tanh(attn_matrix / self.tanh_c)
 
         attn_weight = _gated_softmax(attn_matrix, cached_log_gate, mode="pos", is_infer=True)
 
