@@ -30,7 +30,8 @@ def _build_attn_matrix(
     scale: float,
     valid_mask: torch.Tensor | None = None,
     is_causal: bool = False,
-    is_infer: bool = False
+    is_infer: bool = False,
+    tanh_c: float | None = None
 ):
     """
     Args:
@@ -55,6 +56,8 @@ def _build_attn_matrix(
         if not is_compressed:
             attn_matrix = torch.matmul(q, k.transpose(-2, -1))
             attn_matrix.mul_(scale)
+            if tanh_c is not None and tanh_c > 0:
+                attn_matrix = tanh_c * torch.tanh(attn_matrix / tanh_c)
             if is_causal:
                 causal_mask = torch.triu(
                     torch.ones(seq_len, seq_len, dtype=torch.bool, device=device),
@@ -72,6 +75,9 @@ def _build_attn_matrix(
             k = k[:, :, :-1, :]
             attn_matrix[:, :, :, -1] = self_score
             attn_matrix.mul_(scale)
+
+            if tanh_c is not None:
+                attn_matrix = tanh_c * torch.tanh(attn_matrix / tanh_c)
             
             if is_causal:
                 causal_mask = key_pos >= pos_idx.unsqueeze(-1)
@@ -86,6 +92,9 @@ def _build_attn_matrix(
     else:
         attn_matrix = torch.matmul(q, k.transpose(-2, -1))
         attn_matrix = attn_matrix * scale
+
+        if tanh_c is not None:
+            attn_matrix = tanh_c * torch.tanh(attn_matrix / tanh_c)
 
         if is_causal:
             causal_mask = torch.triu(
@@ -160,21 +169,15 @@ class SelectiveMHA(nn.Module):
         self.head_dim = head_dim
         self.is_causal = is_causal
         self.scale = self.head_dim ** -0.5
+        self.tanh_c = 4.0
 
         self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.rope = RoPE(self.head_dim)
-        self.norm = RMSNorm(self.head_dim, elementwise_affine=False)
-        self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
-        self.q_scale_proj = nn.Linear(dim, dim // 2)
-        self.q_scale_min = nn.Parameter(torch.full((self.num_heads, self.head_dim // 2), 0.8))
-        self.q_scale_range = nn.Parameter(torch.full((self.num_heads, self.head_dim // 2), 0.4))
-        self.k_scale_proj = nn.Linear(dim, dim // 2)
-        self.k_scale_min = nn.Parameter(torch.full((self.num_heads, self.head_dim // 2), 0.8))
-        self.k_scale_range = nn.Parameter(torch.full((self.num_heads, self.head_dim // 2), 0.4))
-
+        
         nn.init.constant_(self.gate_proj.bias, 2.0)
 
     def forward(
@@ -231,35 +234,14 @@ class SelectiveMHA(nn.Module):
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
-        q_scale_min = F.softplus(self.q_scale_min)
-        q_scale_range = F.softplus(self.q_scale_range)
-        q_scale_max_half = q_scale_min + q_scale_range
-        q_scale_raw = self.q_scale_proj(hidden_states).view(batch_size, seq_len, self.num_heads, self.head_dim // 2).transpose(1, 2) 
-        q_scale_half = q_scale_min[None, :, None, :] + q_scale_range[None, :, None, :] * torch.sigmoid(q_scale_raw)
-        q_scale = q_scale_half.repeat_interleave(2, dim=-1)
-        q_scale_max = q_scale_max_half.repeat_interleave(2, dim=-1)
-
-        k_scale_min = F.softplus(self.k_scale_min)
-        k_scale_range = F.softplus(self.k_scale_range)
-        k_scale_max_half = k_scale_min + k_scale_range
-        k_scale_raw = self.k_scale_proj(hidden_states).view(batch_size, seq_len, self.num_heads, self.head_dim // 2).transpose(1, 2)
-        k_scale_half = k_scale_min[None, :, None, :] + k_scale_range[None, :, None, :] * torch.sigmoid(k_scale_raw)
-        k_scale = k_scale_half.repeat_interleave(2, dim=-1)
-        k_scale_max = k_scale_max_half.repeat_interleave(2, dim=-1)
-
-        log_gate_scale = torch.sqrt((q_scale_max.pow(2) * k_scale_max.pow(2)).mean(dim=-1)) * 1.5
-
-        q = self.norm(q) * q_scale
-        k = self.norm(k) * k_scale
-
         positions = torch.arange(seq_len, device=device)
         q_rot, k_rot = self.rope(q, k, positions, mode="seq")
 
-        attn_matrix, k_rot, is_compressed = _build_attn_matrix(q_rot, k_rot, self.scale, valid_mask, self.is_causal, is_infer)
+        attn_matrix, k_rot, is_compressed = _build_attn_matrix(q_rot, k_rot, self.scale, valid_mask, self.is_causal, is_infer, tanh_c=self.tanh_c)
         if is_compressed:
             select_gate = compress(select_gate.unsqueeze(-1), valid_mask).squeeze(-1)
         
-        log_select_gate = torch.log(select_gate) * log_gate_scale[None, :, None]
+        log_select_gate = torch.log(select_gate) * self.tanh_c / 2
         attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 
         if is_compressed:
@@ -363,7 +345,7 @@ class SelectiveMHA(nn.Module):
         else:
             valid_mask = select_gate > 0.0
         select_gate = select_gate * valid_mask
-        log_select_gate = torch.log(select_gate)
+        log_select_gate = torch.log(select_gate) * self.tanh_c / 2
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -372,28 +354,6 @@ class SelectiveMHA(nn.Module):
         q = q.view(batch_size, self.num_heads, self.head_dim)
         k = k.view(batch_size, self.num_heads, self.head_dim)
         v = v.view(batch_size, self.num_heads, self.head_dim)
-
-        q_scale_min = F.softplus(self.q_scale_min)
-        q_scale_range = F.softplus(self.q_scale_range)
-        q_scale_max_half = q_scale_min + q_scale_range
-        q_scale_raw = self.q_scale_proj(hidden_states).view(batch_size, self.num_heads, self.head_dim // 2)
-        q_scale_half = q_scale_min[None, :, :] + q_scale_range[None, :, :] * torch.sigmoid(q_scale_raw)
-        q_scale = q_scale_half.repeat_interleave(2, dim=-1)
-        q_scale_max = q_scale_max_half.repeat_interleave(2, dim=-1)
-
-        k_scale_min = F.softplus(self.k_scale_min)
-        k_scale_range = F.softplus(self.k_scale_range)
-        k_scale_max_half = k_scale_min + k_scale_range
-        k_scale_raw = self.k_scale_proj(hidden_states).view(batch_size, self.num_heads, self.head_dim // 2)
-        k_scale_half = k_scale_min[None, :, :] + k_scale_range[None, :, :] * torch.sigmoid(k_scale_raw)
-        k_scale = k_scale_half.repeat_interleave(2, dim=-1)
-        k_scale_max = k_scale_max_half.repeat_interleave(2, dim=-1)
-
-        log_gate_scale = torch.sqrt((q_scale_max.pow(2) * k_scale_max.pow(2)).mean(dim=-1)) * 1.5
-
-        q = self.norm(q) * q_scale
-        k = self.norm(k) * k_scale
-        log_select_gate *= log_gate_scale[None, :]
         
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
         
@@ -408,6 +368,7 @@ class SelectiveMHA(nn.Module):
 
         attn_matrix = (q_rot.unsqueeze(2) @ cached_k.transpose(-2, -1)).squeeze(2)
         attn_matrix.mul_(self.scale)
+        attn_matrix = self.tanh_c * torch.tanh(attn_matrix / self.tanh_c)
 
         attn_weight = _gated_softmax(attn_matrix, cached_log_gate, mode="pos", is_infer=True)
 
