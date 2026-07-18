@@ -110,7 +110,7 @@ class CrossSelectiveMHA(nn.Module):
                 k = compress(k, select_mask)
                 v = compress(v, select_mask)
 
-            log_select_gate = torch.log(select_gate) * self.score_std_ema * self.log_gate_penalty
+            log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :, None] * self.log_gate_penalty
             cache.k = k
             cache.v = v
             cache.log_gate = log_select_gate
