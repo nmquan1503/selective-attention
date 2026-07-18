@@ -239,3 +239,42 @@ class CausalLM(nn.Module):
             return seq_ids, stats
 
         return seq_ids
+
+    def compute_attn_gate_threshold(
+        self, 
+        inputs: List[torch.Tensor],
+        mass_threshold: float,
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig
+    ):
+        """
+        Args:
+            inputs: List[(batch_size, seq_len)]
+        Returns:
+            gate_threshold: (num_layers, num_heads)
+        """
+        num_bins = analysis_cfg.gate_attn_num_bins
+        num_heads = self.cfg.model_dim // self.cfg.head_dim
+        mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        
+        with torch.inference_mode():
+            for ip in inputs:
+                ip = ip.to(self.cfg.device)
+                _, stats_dict = self.generate(ip, gen_cfg, analysis_cfg)
+                layers_stats = stats_dict["layers"]
+                for layer_idx in range(self.cfg.num_layers):
+                    gate_analysis = layers_stats[layer_idx]["causal_attn_gate_analysis"]
+                    mass[layer_idx] += gate_analysis["attn_mass"]
+                    count[layer_idx] += gate_analysis["attn_count"]
+
+        mass_mean = mass / count.clamp(min=1)
+        above_threshold = mass_mean >= mass_threshold
+        has_exceeding_bin = above_threshold.any(dim=-1)
+        first_bin = above_threshold.float().argmax(dim=-1)
+        gate_threshold = first_bin.float() / num_bins
+        gate_threshold = gate_threshold.masked_fill(
+            ~has_exceeding_bin,
+            1.0,
+        )
+        return gate_threshold
