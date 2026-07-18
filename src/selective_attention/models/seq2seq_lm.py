@@ -11,6 +11,7 @@ class Seq2SeqLMConfig:
     vocab_size: int = 32000
     model_dim: int = 512
     head_dim: int = 64
+    attn_log_gate_penalty: float = 2.0
     ssm_state_dim: int = 64
     ssm_conv_kernel_size: int = 4
     ssm_num_groups: int = 1
@@ -38,6 +39,7 @@ class Seq2SeqLM(nn.Module):
                 layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
+                attn_log_gate_penalty=cfg.attn_log_gate_penalty,
                 ssm_state_dim=cfg.ssm_state_dim,
                 ssm_conv_kernel_size=cfg.ssm_conv_kernel_size,
                 ssm_num_groups=cfg.ssm_num_groups,
@@ -63,6 +65,7 @@ class Seq2SeqLM(nn.Module):
                 layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
+                attn_log_gate_penalty=cfg.attn_log_gate_penalty,
                 ssm_state_dim=cfg.ssm_state_dim,
                 ssm_conv_kernel_size=cfg.ssm_conv_kernel_size,
                 ssm_num_groups=cfg.ssm_num_groups,
@@ -311,3 +314,71 @@ class Seq2SeqLM(nn.Module):
             return seq_ids, stats
 
         return seq_ids
+
+    def compute_attn_gate_threshold(
+        self,
+        inputs: List[torch.Tensor],
+        mass_threshold: float,
+        gen_cfg: GenerationConfig,
+        analysis_cfg: AnalysisConfig
+    ):
+        """
+        Args:
+            inputs: List[(batch_size, seq_len)]
+        Returns:
+            enc_gate_threshold: (num_layers, num_heads)
+            cross_gate_threshold: (num_layers, num_heads)
+            dec_gate_threshold: (num_layers, num_heads)
+        """ 
+        num_bins = analysis_cfg.gate_attn_num_bins
+        num_heads = self.cfg.model_dim // self.cfg.head_dim
+        
+        enc_mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        enc_count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        
+        cross_mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        cross_count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        
+        dec_mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        dec_count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        
+        with torch.inference_mode():
+            for ip in inputs:
+                ip = ip.to(self.cfg.device)
+                _, stats_dict = self.generate(ip, gen_cfg, analysis_cfg)
+                layers_stats = stats_dict["layers"]
+                for layer_idx in range(self.cfg.num_layers):
+                    enc_analysis = layers_stats[layer_idx]["non_causal_attn_gate_analysis"]
+                    enc_mass[layer_idx] += enc_analysis["attn_mass"]
+                    enc_count[layer_idx] += enc_analysis["attn_count"]
+
+                    cross_analysis = layers_stats[layer_idx]["cross_attn_gate_analysis"]
+                    cross_mass[layer_idx] += cross_analysis["attn_mass"]
+                    cross_count[layer_idx] += cross_analysis["attn_count"]
+                
+                    dec_analysis = layers_stats[layer_idx]["causal_attn_gate_analysis"]
+                    dec_mass[layer_idx] += dec_analysis[layer_idx]["attn_mass"]
+                    dec_count[layer_idx] += dec_analysis[layer_idx]["attn_count"]
+        
+        enc_mass_mean = enc_mass / enc_count.clamp(min=1)
+        enc_above_threshold = enc_mass_mean >= mass_threshold
+        enc_has_exceeding_bin = enc_above_threshold.any(dim=-1)
+        enc_first_bin = enc_above_threshold.float().argmax(dim=-1)
+        enc_gate_threshold = enc_first_bin.float() / num_bins
+        enc_gate_threshold = enc_gate_threshold.masked_fill(~enc_has_exceeding_bin, 1.0)
+
+        cross_mass_mean = cross_mass / cross_count.clamp(min=1)
+        cross_above_threshold = cross_mass_mean >= mass_threshold
+        cross_has_exceeding_bin = cross_above_threshold.any(dim=-1)
+        cross_first_bin = cross_above_threshold.float().argmax(dim=-1)
+        cross_gate_threshold = cross_first_bin.float() / num_bins
+        cross_gate_threshold = cross_gate_threshold.masked_fill(~cross_has_exceeding_bin, 1.0)
+
+        dec_mass_mean = dec_mass / dec_count.clamp(min=1)
+        dec_above_threshold = dec_mass_mean >= mass_threshold
+        dec_has_exceeding_bin = dec_above_threshold.any(dim=-1)
+        dec_first_bin = dec_above_threshold.float().argmax(dim=-1)
+        dec_gate_threshold = dec_first_bin.float() / num_bins
+        dec_gate_threshold = dec_gate_threshold.masked_fill(~dec_has_exceeding_bin, 1.0)
+
+        return enc_gate_threshold, cross_gate_threshold, dec_gate_threshold

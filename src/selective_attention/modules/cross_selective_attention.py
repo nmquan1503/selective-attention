@@ -37,7 +37,8 @@ class CrossSelectiveMHA(nn.Module):
         self, 
         layer_idx: int,
         dim: int, 
-        head_dim: int
+        head_dim: int,
+        log_gate_penalty: float
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -47,12 +48,15 @@ class CrossSelectiveMHA(nn.Module):
         self.num_heads = dim // head_dim
         self.head_dim = head_dim
         self.scale = self.head_dim ** -0.5
+        self.log_gate_penalty = log_gate_penalty
 
-        self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
         self.select_gate_proj = nn.Linear(dim, self.num_heads)
+
+        self.register_buffer("score_std_ema", torch.zeros(self.num_heads))
 
         nn.init.constant_(self.select_gate_proj.bias, 2.0)
 
@@ -106,20 +110,39 @@ class CrossSelectiveMHA(nn.Module):
                 k = compress(k, select_mask)
                 v = compress(v, select_mask)
 
-            log_select_gate = torch.log(select_gate)
+            log_select_gate = torch.log(select_gate) * self.score_std_ema * self.log_gate_penalty
             cache.k = k
             cache.v = v
             cache.log_gate = log_select_gate
-        else:
-            log_select_gate = torch.log(select_gate)
-            if context_lengths is not None:
-                valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
-                log_select_gate = log_select_gate.masked_fill(
-                    ~valid_mask[:, None, :],
-                    float("-inf"),
-                )
         
         attn_matrix = (q @ k.transpose(-2, -1)) * self.scale
+
+        if self.training:
+            if context_lengths is not None:
+                key_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
+                attn_matrix = attn_matrix.masked_fill(~key_mask[:, None, None, :], float("-inf"))
+            valid_attention_score_mask = attn_matrix != float("-inf")
+            valid_attention_score_count = valid_attention_score_mask.sum(dim=(0, 2, 3)).float()
+            valid_attention_scores = attn_matrix.masked_fill(
+                ~valid_attention_score_mask, 0.0
+            )
+            attention_score_sum = valid_attention_scores.sum(dim=(0, 2, 3))
+            attention_score_squared_sum = valid_attention_scores.square().sum(dim=(0, 2, 3))
+            head_attention_score_mean = (
+                attention_score_sum / valid_attention_score_count.clamp(min=1)
+            )
+            head_attention_score_variance = (
+                attention_score_squared_sum / valid_attention_score_count.clamp(min=1)
+                - head_attention_score_mean.square()
+            )
+            head_attention_score_std = head_attention_score_variance.clamp(min=0).sqrt()
+            with torch.no_grad():
+                self.score_std_ema.mul_(0.9).add_(
+                    head_attention_score_std,
+                    alpha=0.1,
+                )
+            log_select_gate = torch.log(select_gate) * head_attention_score_std[None, :, None] * self.log_gate_penalty
+
         if is_infer:
             attn_matrix[:, :, :, 1:] += log_select_gate[:, :, 1:].unsqueeze(2)
         else:

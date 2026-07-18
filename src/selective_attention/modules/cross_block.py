@@ -14,6 +14,7 @@ class CrossBlock(nn.Module):
         layer_idx: int,
         model_dim: int = 512,
         head_dim: int = 64,
+        attn_log_gate_penalty: float = 2,
         ssm_state_dim: int = 128,
         ssm_conv_kernel_size: int = 4,
         ssm_num_groups: int = 1,
@@ -39,8 +40,19 @@ class CrossBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.mha = SelectiveMHA(layer_idx, model_dim, head_dim, is_causal=True)
-        self.cross_mha = CrossSelectiveMHA(layer_idx, model_dim, head_dim)
+        self.mha = SelectiveMHA(
+            layer_idx=layer_idx, 
+            dim=model_dim, 
+            head_dim=head_dim,
+            log_gate_penalty=attn_log_gate_penalty, 
+            is_causal=True
+        )
+        self.cross_mha = CrossSelectiveMHA(
+            layer_idx=layer_idx,
+            dim=model_dim, 
+            head_dim=head_dim,
+            log_gate_penalty=attn_log_gate_penalty
+        )
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 
