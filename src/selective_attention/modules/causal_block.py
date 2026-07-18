@@ -43,7 +43,7 @@ class CausalBlock(nn.Module):
         )
         self.mha = SelectiveMHA(
             layer_idx=layer_idx, 
-            model_dim=model_dim, 
+            dim=model_dim, 
             head_dim=head_dim,
             log_gate_penalty=attn_log_gate_penalty, 
             is_causal=True
