@@ -114,7 +114,15 @@ class CrossSelectiveMHA(nn.Module):
             cache.k = k
             cache.v = v
             cache.log_gate = log_select_gate
-        
+        elif is_infer:
+            log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :, None] * self.log_gate_penalty
+            if context_lengths is not None:
+                valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
+                log_select_gate = log_select_gate.masked_fill(
+                    ~valid_mask[:, None, :],
+                    float("-inf"),
+                )
+
         attn_matrix = (q @ k.transpose(-2, -1)) * self.scale
 
         if self.training:
