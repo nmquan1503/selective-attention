@@ -11,6 +11,7 @@ class CausalLMConfig:
     vocab_size: int = 32000
     model_dim: int = 512
     head_dim: int = 64
+    attn_log_gate_penalty: float = 2.0
     ssm_state_dim: int = 64
     ssm_conv_kernel_size: int = 4
     ssm_num_groups: int = 1
@@ -34,6 +35,7 @@ class CausalLM(nn.Module):
                 layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
+                attn_log_gate_penalty=cfg.attn_log_gate_penalty,
                 ssm_state_dim=cfg.ssm_state_dim,
                 ssm_conv_kernel_size=cfg.ssm_conv_kernel_size,
                 ssm_num_groups=cfg.ssm_num_groups,

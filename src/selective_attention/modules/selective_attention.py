@@ -149,6 +149,7 @@ class SelectiveMHA(nn.Module):
         layer_idx: int, 
         dim: int, 
         head_dim: int,
+        log_gate_penalty: float,
         is_causal: bool
     ):
         super().__init__()
@@ -160,6 +161,7 @@ class SelectiveMHA(nn.Module):
         self.head_dim = head_dim
         self.is_causal = is_causal
         self.scale = self.head_dim ** -0.5
+        self.log_gate_penalty = log_gate_penalty
 
         self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.rope = RoPE(self.head_dim)
@@ -258,9 +260,9 @@ class SelectiveMHA(nn.Module):
         
         log_select_gate = torch.log(select_gate)
         if is_infer:
-            log_select_gate *= self.score_std_ema[None, :, None] * 1.5
+            log_select_gate *= self.score_std_ema[None, :, None] * self.log_gate_penalty
         else:
-            log_select_gate *= head_attention_score_std[None, :, None] * 1.5
+            log_select_gate *= head_attention_score_std[None, :, None] * self.log_gate_penalty
         attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 
         if is_compressed:
@@ -364,7 +366,7 @@ class SelectiveMHA(nn.Module):
         else:
             valid_mask = select_gate > 0.0
         select_gate = select_gate * valid_mask
-        log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :] * 1.5
+        log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :] * self.log_gate_penalty
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
