@@ -151,12 +151,6 @@ class CrossSelectiveMHA(nn.Module):
                 )
             log_select_gate = torch.log(select_gate) * head_attention_score_std[None, :, None] * self.log_gate_penalty
 
-            if context_lengths is not None:
-                log_select_gate = log_select_gate.masked_fill(
-                    ~key_mask[:, None, :],
-                    float("-inf"),
-                )
-
         if is_infer:
             attn_matrix[:, :, :, 1:] += log_select_gate[:, :, 1:].unsqueeze(2)
         else:

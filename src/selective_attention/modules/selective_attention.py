@@ -205,10 +205,6 @@ class SelectiveMHA(nn.Module):
 
         if lengths is not None:
             pad_mask = torch.arange(seq_len, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-            if is_infer:
-                select_gate.masked_fill_(pad_mask.unsqueeze(1), 0.0)
-            else:
-                select_gate = select_gate.masked_fill(pad_mask.unsqueeze(1), 0.0)
 
         v = self.v_proj(hidden_states)
         
@@ -217,6 +213,8 @@ class SelectiveMHA(nn.Module):
             valid_mask = select_gate > 0.0
             if attn_gate_threshold is not None:
                 valid_mask &= (select_gate >= attn_gate_threshold[None, :, None])
+            if lengths is not None:
+                valid_mask &= ~pad_mask[:, None, :]
             if not valid_mask.any():
                 hidden_states = self.out_proj(v * out_gate)
                 return hidden_states
@@ -235,6 +233,8 @@ class SelectiveMHA(nn.Module):
         
         if self.training:
             valid_attention_score_mask = attn_matrix != float("-inf")
+            if lengths is not None:
+                valid_attention_score_mask = valid_attention_score_mask & ~pad_mask[:, None, :, None] & ~pad_mask[:, None, None, :]
             valid_attention_score_count = valid_attention_score_mask.sum(dim=(0, 2, 3)).float()
             valid_attention_scores = attn_matrix.masked_fill(
                 ~valid_attention_score_mask, 0.0
@@ -254,15 +254,22 @@ class SelectiveMHA(nn.Module):
                     head_attention_score_std,
                     alpha=0.1,
                 )
-            
-        if is_compressed:
-            select_gate = compress(select_gate.unsqueeze(-1), valid_mask).squeeze(-1)
         
         log_select_gate = torch.log(select_gate)
         if is_infer:
             log_select_gate *= self.score_std_ema[None, :, None] * self.log_gate_penalty
         else:
             log_select_gate *= head_attention_score_std[None, :, None] * self.log_gate_penalty
+        
+        if lengths is not None:
+            if is_infer:
+                log_select_gate.masked_fill_(pad_mask.unsqueeze(1), float("-inf"))
+            else:
+                log_select_gate = log_select_gate.masked_fill(pad_mask.unsqueeze(1), float("-inf"))
+
+        if is_compressed:
+            log_select_gate = compress(log_select_gate.unsqueeze(-1), valid_mask).squeeze(-1)
+        
         attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 
         if is_compressed:
