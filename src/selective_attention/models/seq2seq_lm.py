@@ -292,24 +292,12 @@ class Seq2SeqLM(nn.Module):
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
 
         if analysis_cfg is not None:
-            decoder_len = 2 + state.step
-
-            real_input_len = lengths.sum().item()
-            total_possible_cross = real_input_len * self.cfg.num_layers
-            total_possible_self  = decoder_len * self.cfg.num_layers
-            total_possible = total_possible_cross + total_possible_self
-
-            total_kept = 0
-            for layer_cache in cache:
-                if layer_cache.cross_attn_cache.k is not None:
-                    cross_kept = layer_cache.cross_attn_cache.k.shape[2]
-                else:
-                    cross_kept = 0
-                self_kept = layer_cache.attn_cache.write_idx
-                total_kept += cross_kept + self_kept
-
-            token_kept_ratio = total_kept / total_possible
-            stats["overall"]["token_kept_ratio"] = token_kept_ratio
+            max_cached_tokens = (seq_len + min(state.step() + 2, gen_cfg.max_new_tokens)) * self.cfg.num_layers
+            total_kept_tokens = sum(
+                cache[layer_idx].cross_attn_cache.k.shape[2] + cache[layer_idx].attn_cache.write_idx
+                for layer_idx in range(self.cfg.num_layers)
+            )
+            stats["overall"]["token_kept_ratio"] = total_kept_tokens / max_cached_tokens
 
             return seq_ids, stats
 
