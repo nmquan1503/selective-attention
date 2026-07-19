@@ -292,7 +292,7 @@ class Seq2SeqLM(nn.Module):
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
 
         if analysis_cfg is not None:
-            max_cached_tokens = (seq_len + min(state.step() + 2, gen_cfg.max_new_tokens)) * self.cfg.num_layers
+            max_cached_tokens = (seq_len + min(state.step + 2, gen_cfg.max_new_tokens)) * self.cfg.num_layers
             total_kept_tokens = sum(
                 cache[layer_idx].cross_attn_cache.k.shape[2] + cache[layer_idx].attn_cache.write_idx
                 for layer_idx in range(self.cfg.num_layers)
