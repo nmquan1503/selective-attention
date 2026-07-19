@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 from typing import List
+from copy import deepcopy
 
 from ..modules import RMSNorm, CausalBlock
 from ..inference import InferenceState, CausalBlockCache, GenerationConfig, AnalysisConfig
@@ -253,9 +254,12 @@ class CausalLM(nn.Module):
         """
         num_bins = analysis_cfg.gate_attn_num_bins
         num_heads = self.cfg.model_dim // self.cfg.head_dim
+        gen_cfg = deepcopy(gen_cfg)
+        gen_cfg.attn_gate_thresholds = None
         mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
         count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
-        
+        freq = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+
         with torch.inference_mode():
             for ip in inputs:
                 ip = ip.to(self.cfg.device)
@@ -265,9 +269,12 @@ class CausalLM(nn.Module):
                     gate_analysis = layers_stats[layer_idx]["causal_attn_gate_analysis"]
                     mass[layer_idx] += gate_analysis["attn_mass"]
                     count[layer_idx] += gate_analysis["attn_count"]
+                    freq[layer_idx] += gate_analysis["gate_freq"]
 
         mass_mean = mass / count.clamp(min=1)
-        above_threshold = mass_mean >= mass_threshold
+        min_freq = (1.0 / num_bins) * 0.1
+        freq = freq / freq.sum(dim=-1, keepdim=True).clamp(min=1)
+        above_threshold = (mass_mean >= mass_threshold) & (freq >= min_freq)
         has_exceeding_bin = above_threshold.any(dim=-1)
         first_bin = above_threshold.float().argmax(dim=-1)
         gate_threshold = first_bin.float() / num_bins
