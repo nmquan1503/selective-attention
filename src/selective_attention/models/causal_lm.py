@@ -227,12 +227,18 @@ class CausalLM(nn.Module):
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
 
         if analysis_cfg is not None:
-            max_cached_tokens = (seq_len + min(state.step + 1, gen_cfg.max_new_tokens)) * self.cfg.num_layers
+            num_heads = self.cfg.model_dim // self.cfg.head_dim
+            max_original_tokens = seq_len + min(state.step + 1, gen_cfg.max_new_tokens)
+            max_cached_tokens = max_original_tokens * num_heads * self.cfg.num_layers
+            
+            total_kept_tokens = 0
+            for layer_idx in range(self.cfg.num_layers):
+                attn_cache = cache[layer_idx].attn_cache
+                log_gate = attn_cache.log_gate
+                write_idx = attn_cache.write_idx
+                valid = ~torch.isinf(log_gate[:, :, :write_idx])
+                total_kept_tokens += valid.sum().item()
 
-            total_kept_tokens = sum(
-                cache[layer_idx].attn_cache.write_idx
-                for layer_idx in range(self.cfg.num_layers)
-            )
             stats["overall"]["token_kept_ratio"] = total_kept_tokens / max_cached_tokens
 
             return seq_ids, stats
