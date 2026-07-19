@@ -286,13 +286,14 @@ class SelectiveMHA(nn.Module):
         
         if analysis_cfg is not None and stats is not None  and attn_gate_threshold is None:
             mean_out_gate = out_gate.view(batch_size, seq_len, self.num_heads, self.head_dim).mean(dim=-1).transpose(1, 2)
+            query_valid = (mean_out_gate >= 0.05).float()
             if self.is_causal:
                 scale = torch.arange(1, seq_len + 1, device=device).view(1, 1, seq_len, 1)
             elif lengths is not None:
                 scale = lengths.view(-1, 1, 1, 1)
             else:
                 scale = torch.tensor(seq_len, device=device, dtype=attn_weight.dtype)
-            scaled_weight = attn_weight * scale * mean_out_gate.unsqueeze(-1)
+            scaled_weight = attn_weight * scale * query_valid.unsqueeze(-1)
             pos = torch.arange(seq_len, device=device)
             if lengths is not None:
                 query_valid = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(-1) 
@@ -408,8 +409,9 @@ class SelectiveMHA(nn.Module):
 
         if analysis_cfg is not None and stats is not None and attn_gate_threshold is None:
             mean_out_gate = out_gate.view(batch_size, self.num_heads, self.head_dim).mean(dim=-1)
+            query_valid = (mean_out_gate >= 0.05).float()
             seq_len = cache.write_idx
-            scaled_weight = attn_weight * seq_len * mean_out_gate.unsqueeze(-1)
+            scaled_weight = attn_weight * seq_len * query_valid.unsqueeze(-1)
 
             num_bins = analysis_cfg.gate_attn_num_bins
             attn_mass = stats["causal_attn_gate_analysis"]["attn_mass"]
