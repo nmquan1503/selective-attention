@@ -285,13 +285,14 @@ class SelectiveMHA(nn.Module):
             cache.build_kv(k_rot, v_aligned, log_select_gate)
         
         if analysis_cfg is not None and stats is not None  and attn_gate_threshold is None:
+            mean_out_gate = out_gate.view(batch_size, seq_len, self.num_heads, self.head_dim).mean(dim=-1).transpose(1, 2)
             if self.is_causal:
                 scale = torch.arange(1, seq_len + 1, device=device).view(1, 1, seq_len, 1)
             elif lengths is not None:
                 scale = lengths.view(-1, 1, 1, 1)
             else:
                 scale = torch.tensor(seq_len, device=device, dtype=attn_weight.dtype)
-            scaled_weight = attn_weight * scale
+            scaled_weight = attn_weight * scale * mean_out_gate.unsqueeze(-1)
             pos = torch.arange(seq_len, device=device)
             if lengths is not None:
                 query_valid = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(-1) 
