@@ -407,8 +407,9 @@ class SelectiveMHA(nn.Module):
             cache.write_idx -= 1
 
         if analysis_cfg is not None and stats is not None and attn_gate_threshold is None:
+            mean_out_gate = out_gate.view(batch_size, self.num_heads, self.head_dim).mean(dim=-1)
             seq_len = cache.write_idx
-            scaled_weight = attn_weight * seq_len
+            scaled_weight = attn_weight * seq_len * mean_out_gate.unsqueeze(-1)
 
             num_bins = analysis_cfg.gate_attn_num_bins
             attn_mass = stats["causal_attn_gate_analysis"]["attn_mass"]
