@@ -243,6 +243,8 @@ class CausalLM(nn.Module):
 
             stats["overall"]["token_kept_ratio"] = total_kept_tokens / max_cached_tokens
 
+            return seq_ids, stats
+
         return seq_ids
 
     def compute_attn_gate_threshold(
