@@ -286,7 +286,7 @@ class SelectiveMHA(nn.Module):
         
         if analysis_cfg is not None and stats is not None  and attn_gate_threshold is None:
             mean_out_gate = out_gate.view(batch_size, seq_len, self.num_heads, self.head_dim).mean(dim=-1).transpose(1, 2)
-            query_valid = (mean_out_gate >= 0.05).float()
+            query_valid = (mean_out_gate >= 0.1).float()
             if self.is_causal:
                 scale = torch.arange(1, seq_len + 1, device=device).view(1, 1, seq_len, 1)
             elif lengths is not None:
@@ -409,7 +409,7 @@ class SelectiveMHA(nn.Module):
 
         if analysis_cfg is not None and stats is not None and attn_gate_threshold is None:
             mean_out_gate = out_gate.view(batch_size, self.num_heads, self.head_dim).mean(dim=-1)
-            query_valid = (mean_out_gate >= 0.05).float()
+            query_valid = (mean_out_gate >= 0.1).float()
             seq_len = cache.write_idx
             scaled_weight = attn_weight * seq_len * query_valid.unsqueeze(-1)
 
