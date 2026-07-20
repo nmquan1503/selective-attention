@@ -241,7 +241,7 @@ class CausalLM(nn.Module):
                 valid = ~torch.isinf(log_gate[:, :, :write_idx])
                 total_kept_tokens += valid.sum().item()
 
-            stats["overall"]["token_kept_ratio"] = total_kept_tokens / max_cached_tokens
+            stats["overall"]["kept_ratio"] = total_kept_tokens / max_cached_tokens
 
             return seq_ids, stats
 
