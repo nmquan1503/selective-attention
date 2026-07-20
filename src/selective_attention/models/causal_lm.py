@@ -192,22 +192,6 @@ class CausalLM(nn.Module):
             stats["layers"] if stats is not None else None
         )
         logits = logits[torch.arange(batch_size, device=device), last_indices]
-
-        if analysis_cfg is not None:
-            num_heads = self.cfg.model_dim // self.cfg.head_dim
-            max_prefill_slots = seq_len * num_heads * self.cfg.num_layers
-
-            kept_prefill_tokens = 0
-            for layer_cache in cache:
-                attn_cache = layer_cache.attn_cache
-                write_idx = attn_cache.write_idx
-                log_gate = attn_cache.log_gate
-                if log_gate is None:
-                    continue
-                valid = ~torch.isinf(log_gate[:, :, :write_idx])
-                kept_prefill_tokens += valid.sum().item()
-
-            stats["overall"]["prefill_kept_ratio"] = kept_prefill_tokens / max_prefill_slots
         
         seq_ids = torch.full(
             (batch_size, seq_len + gen_cfg.max_new_tokens),
@@ -243,7 +227,21 @@ class CausalLM(nn.Module):
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
 
         if analysis_cfg is not None:
-            return seq_ids, stats
+            num_heads = self.cfg.model_dim // self.cfg.head_dim
+            max_original_tokens = seq_len + min(state.step + 1, gen_cfg.max_new_tokens)
+            max_cached_tokens = max_original_tokens * num_heads * self.cfg.num_layers
+            
+            total_kept_tokens = 0
+            for layer_idx in range(self.cfg.num_layers):
+                attn_cache = cache[layer_idx].attn_cache
+                log_gate = attn_cache.log_gate
+                if log_gate is None:
+                    continue
+                write_idx = attn_cache.write_idx
+                valid = ~torch.isinf(log_gate[:, :, :write_idx])
+                total_kept_tokens += valid.sum().item()
+
+            stats["overall"]["token_kept_ratio"] = total_kept_tokens / max_cached_tokens
 
         return seq_ids
 
