@@ -12,7 +12,7 @@ def _reset_cache(cache: SelectiveAttnCache, buffer_size: int):
     valid_mask = ~torch.isinf(cache.log_gate)
     all_kept = valid_mask.all(dim=-1)
     if not all_kept.any():
-        cache.log_gate = compress(cache.log_gate.unsqueeze(-1), valid_mask, buffer_size=buffer_size).squeeze(-1)
+        cache.log_gate = compress(cache.log_gate.unsqueeze(-1), valid_mask, buffer_size=buffer_size, pad_value=float("-inf")).squeeze(-1)
         cache.k_rot = compress(cache.k_rot, valid_mask, buffer_size=buffer_size)
         cache.v = compress(cache.v, valid_mask, buffer_size=buffer_size)
     else:
@@ -268,7 +268,7 @@ class SelectiveMHA(nn.Module):
                 log_select_gate = log_select_gate.masked_fill(pad_mask.unsqueeze(1), float("-inf"))
 
         if is_compressed:
-            log_select_gate = compress(log_select_gate.unsqueeze(-1), valid_mask).squeeze(-1)
+            log_select_gate = compress(log_select_gate.unsqueeze(-1), valid_mask, pad_value=float("-inf")).squeeze(-1)
         
         attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 

@@ -101,7 +101,8 @@ def compress(
     x: torch.Tensor,
     valid_mask: torch.Tensor,
     buffer_size: int = 0,
-    return_new_mask: bool = False
+    return_new_mask: bool = False,
+    pad_value: float = 0.0
 ):
     """    
     Args:
@@ -121,7 +122,7 @@ def compress(
     rank = valid_mask.cumsum(dim=-1) - 1
     new_len = max_valid + buffer_size
 
-    out = torch.zeros(batch_size, num_heads, new_len, head_dim, device=device, dtype=x.dtype)
+    out = torch.full((batch_size, num_heads, new_len, head_dim), fill_value=pad_value, device=device, dtype=x.dtype)
 
     flat_bh = batch_size * num_heads
     out_flat = out.view(flat_bh, new_len, head_dim)
