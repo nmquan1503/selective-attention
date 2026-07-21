@@ -32,7 +32,7 @@ def _gated_softmax(attn_matrix, gate, is_infer, eps=1e-12):
     
     return attn_weight
 
-class CrossSelectiveMHA(nn.Module):
+class CrossMinMHA(nn.Module):
     def __init__(
         self, 
         layer_idx: int,
@@ -54,11 +54,11 @@ class CrossSelectiveMHA(nn.Module):
         self.k_proj = nn.Linear(dim, dim, bias=False)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
-        self.select_gate_proj = nn.Linear(dim, self.num_heads)
+        self.retrieval_gate_proj = nn.Linear(dim, self.num_heads)
 
         self.register_buffer("score_std_ema", torch.zeros(self.num_heads))
 
-        nn.init.constant_(self.select_gate_proj.bias, 2.0)
+        nn.init.constant_(self.retrieval_gate_proj.bias, 2.0)
 
     def forward(
         self, 
@@ -86,7 +86,7 @@ class CrossSelectiveMHA(nn.Module):
         is_infer = not self.training
         is_prefill = is_infer and cache is not None
 
-        select_gate = torch.sigmoid(self.select_gate_proj(context)).transpose(1, 2).contiguous()
+        retrieval_gate = torch.sigmoid(self.retrieval_gate_proj(context)).transpose(1, 2).contiguous()
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(context)
@@ -96,29 +96,29 @@ class CrossSelectiveMHA(nn.Module):
         v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
         if is_prefill:
-            select_gate[:, :, 0] = 1
+            retrieval_gate[:, :, 0] = 1
             if context_lengths is not None:
                 valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
                 if not is_infer:
-                    select_gate = select_gate * valid_mask[:, None, :]
+                    retrieval_gate = retrieval_gate * valid_mask[:, None, :]
                 else:
-                    select_gate *= valid_mask[:, None, :]
+                    retrieval_gate *= valid_mask[:, None, :]
             if attn_gate_threshold is not None:
-                select_mask = (select_gate >= attn_gate_threshold[None, :, None]) & (select_gate > 0.0)
+                select_mask = (retrieval_gate >= attn_gate_threshold[None, :, None]) & (retrieval_gate > 0.0)
                 select_mask[:, :, 0] = True
-                select_gate = compress(select_gate.unsqueeze(-1), select_mask).squeeze(-1)
+                retrieval_gate = compress(retrieval_gate.unsqueeze(-1), select_mask).squeeze(-1)
                 k = compress(k, select_mask)
                 v = compress(v, select_mask)
 
-            log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate = torch.log(retrieval_gate) * self.score_std_ema[None, :, None] * self.log_gate_penalty
             cache.k = k
             cache.v = v
-            cache.log_gate = log_select_gate
+            cache.log_gate = log_retrieval_gate
         elif is_infer:
-            log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate = torch.log(retrieval_gate) * self.score_std_ema[None, :, None] * self.log_gate_penalty
             if context_lengths is not None:
                 valid_mask = torch.arange(context_len, device=device)[None, :] < context_lengths[:, None]
-                log_select_gate = log_select_gate.masked_fill(
+                log_retrieval_gate = log_retrieval_gate.masked_fill(
                     ~valid_mask[:, None, :],
                     float("-inf"),
                 )
@@ -149,12 +149,12 @@ class CrossSelectiveMHA(nn.Module):
                     head_attention_score_std,
                     alpha=0.1,
                 )
-            log_select_gate = torch.log(select_gate) * head_attention_score_std[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate = torch.log(retrieval_gate) * head_attention_score_std[None, :, None] * self.log_gate_penalty
 
         if is_infer:
-            attn_matrix[:, :, :, 1:] += log_select_gate[:, :, 1:].unsqueeze(2)
+            attn_matrix[:, :, :, 1:] += log_retrieval_gate[:, :, 1:].unsqueeze(2)
         else:
-            attn_matrix[:, :, :, 1:] = attn_matrix[:, :, :, 1:] + log_select_gate[:, :, 1:].unsqueeze(2)
+            attn_matrix[:, :, :, 1:] = attn_matrix[:, :, :, 1:] + log_retrieval_gate[:, :, 1:].unsqueeze(2)
         attn_weights = F.softmax(attn_matrix, dim=-1)
         out = attn_weights @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
@@ -176,7 +176,7 @@ class CrossSelectiveMHA(nn.Module):
             count_per_key = (scaled_weight > 0).sum(dim=2)
 
             num_bins = analysis_cfg.gate_attn_num_bins
-            bin_idx = (select_gate * num_bins).long().clamp(0, num_bins - 1)
+            bin_idx = (retrieval_gate * num_bins).long().clamp(0, num_bins - 1)
             head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, context_len).reshape(-1)
             flat_index = head_idx * num_bins + bin_idx.reshape(-1)
 
@@ -226,16 +226,16 @@ class CrossSelectiveMHA(nn.Module):
         hidden_states = self.out_proj(out)
 
         if analysis_cfg is not None and stats is not None and attn_gate_threshold is None:
-            select_gate = torch.exp(cache.log_gate)
-            K = select_gate.shape[2]
-            scale = (select_gate > 0).sum(dim=-1, keepdim=True).float()
+            retrieval_gate = torch.exp(cache.log_gate)
+            K = retrieval_gate.shape[2]
+            scale = (retrieval_gate > 0).sum(dim=-1, keepdim=True).float()
             scaled_weight = attn_weights * scale.unsqueeze(2)
-            key_valid_mask = (select_gate > 0).unsqueeze(2)
+            key_valid_mask = (retrieval_gate > 0).unsqueeze(2)
             scaled_weight = scaled_weight * key_valid_mask
             sum_per_key = scaled_weight.sum(dim=2)
             count_per_key = (scaled_weight > 0).sum(dim=2)
             num_bins = analysis_cfg.gate_attn_num_bins
-            gate_vals = select_gate
+            gate_vals = retrieval_gate
 
             bin_idx = (gate_vals * num_bins).long().clamp(0, num_bins - 1)
             head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, K).reshape(-1)

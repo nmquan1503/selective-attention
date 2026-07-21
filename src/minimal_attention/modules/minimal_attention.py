@@ -3,12 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict
 
-from ..inference import SelectiveAttnCache, InferenceState, GenerationConfig, AnalysisConfig
+from ..inference import MinAttnCache, InferenceState, GenerationConfig, AnalysisConfig
 from .rope import RoPE
 from .rms_norm import RMSNorm
 from ..utils.tensor_utils import compress, pad_buffer
 
-def _reset_cache(cache: SelectiveAttnCache, buffer_size: int):
+def _reset_cache(cache: MinAttnCache, buffer_size: int):
     valid_mask = ~torch.isinf(cache.log_gate)
     all_kept = valid_mask.all(dim=-1)
     if not all_kept.any():
@@ -143,7 +143,7 @@ def _gated_softmax(
 
         return F.softmax(attn_matrix, dim=-1)
 
-class SelectiveMHA(nn.Module):
+class MinMHA(nn.Module):
     def __init__(
         self,
         layer_idx: int, 
@@ -179,7 +179,7 @@ class SelectiveMHA(nn.Module):
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
         attn_gate_threshold: torch.Tensor | None = None,
-        cache: SelectiveAttnCache | None = None,
+        cache: MinAttnCache | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: Dict | None = None
     ):
@@ -198,10 +198,10 @@ class SelectiveMHA(nn.Module):
         is_prefill = is_infer and self.is_causal and cache is not None
 
         gate = torch.sigmoid(self.gate_proj(hidden_states))
-        select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
-        select_gate = select_gate.transpose(1, 2).contiguous()
+        retrieval_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
+        retrieval_gate = retrieval_gate.transpose(1, 2).contiguous()
         if is_infer and attn_gate_threshold is not None:
-            select_gate[select_gate < attn_gate_threshold[None, :, None]] = 0.0
+            retrieval_gate[retrieval_gate < attn_gate_threshold[None, :, None]] = 0.0
 
         if lengths is not None:
             pad_mask = torch.arange(seq_len, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
@@ -210,9 +210,9 @@ class SelectiveMHA(nn.Module):
         
         valid_mask = None
         if is_infer:
-            valid_mask = select_gate > 0.0
+            valid_mask = retrieval_gate > 0.0
             if attn_gate_threshold is not None:
-                valid_mask &= (select_gate >= attn_gate_threshold[None, :, None])
+                valid_mask &= (retrieval_gate >= attn_gate_threshold[None, :, None])
             if lengths is not None:
                 valid_mask &= ~pad_mask[:, None, :]
             if not valid_mask.any():
@@ -255,22 +255,22 @@ class SelectiveMHA(nn.Module):
                     alpha=0.1,
                 )
         
-        log_select_gate = torch.log(select_gate)
+        log_retrieval_gate = torch.log(retrieval_gate)
         if is_infer:
-            log_select_gate *= self.score_std_ema[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate *= self.score_std_ema[None, :, None] * self.log_gate_penalty
         else:
-            log_select_gate *= head_attention_score_std[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate *= head_attention_score_std[None, :, None] * self.log_gate_penalty
         
         if lengths is not None:
             if is_infer:
-                log_select_gate.masked_fill_(pad_mask.unsqueeze(1), float("-inf"))
+                log_retrieval_gate.masked_fill_(pad_mask.unsqueeze(1), float("-inf"))
             else:
-                log_select_gate = log_select_gate.masked_fill(pad_mask.unsqueeze(1), float("-inf"))
+                log_retrieval_gate = log_retrieval_gate.masked_fill(pad_mask.unsqueeze(1), float("-inf"))
 
         if is_compressed:
-            log_select_gate = compress(log_select_gate.unsqueeze(-1), valid_mask, pad_value=float("-inf")).squeeze(-1)
+            log_retrieval_gate = compress(log_retrieval_gate.unsqueeze(-1), valid_mask, pad_value=float("-inf")).squeeze(-1)
         
-        attn_weight = _gated_softmax(attn_matrix, log_select_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
+        attn_weight = _gated_softmax(attn_matrix, log_retrieval_gate, mode="seq", is_infer=is_infer, is_compressed=is_compressed)
 
         if is_compressed:
             v_aligned = compress(v, valid_mask)
@@ -282,7 +282,7 @@ class SelectiveMHA(nn.Module):
         hidden_states = self.out_proj(out * out_gate)
         
         if is_prefill:
-            cache.build_kv(k_rot, v_aligned, log_select_gate)
+            cache.build_kv(k_rot, v_aligned, log_retrieval_gate)
         
         if analysis_cfg is not None and stats is not None  and attn_gate_threshold is None:
             mean_out_gate = out_gate.view(batch_size, seq_len, self.num_heads, self.head_dim).mean(dim=-1).transpose(1, 2)
@@ -312,7 +312,7 @@ class SelectiveMHA(nn.Module):
             count_per_key = (scaled_weight > 0).sum(dim=2)
 
             num_bins = analysis_cfg.gate_attn_num_bins
-            gate_vals = select_gate
+            gate_vals = retrieval_gate
             bin_idx = (gate_vals * num_bins).long().clamp(0, num_bins - 1)
             head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, seq_len).reshape(-1)
             flat_index = head_idx * num_bins + bin_idx.reshape(-1)
@@ -341,7 +341,7 @@ class SelectiveMHA(nn.Module):
     def step(
         self, 
         hidden_states: torch.Tensor, 
-        cache: SelectiveAttnCache, 
+        cache: MinAttnCache, 
         state: InferenceState,
         gen_cfg: GenerationConfig,
         analysis_cfg: AnalysisConfig | None = None,
@@ -368,14 +368,14 @@ class SelectiveMHA(nn.Module):
                 _reset_cache(cache, gen_cfg.cache_update_interval)
         
         gate = torch.sigmoid(self.gate_proj(hidden_states))
-        select_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
+        retrieval_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
 
         if attn_gate_threshold is not None:
-            valid_mask = (select_gate >= attn_gate_threshold[None, :]) & (select_gate > 0.0)
+            valid_mask = (retrieval_gate >= attn_gate_threshold[None, :]) & (retrieval_gate > 0.0)
         else:
-            valid_mask = select_gate > 0.0
-        select_gate = select_gate * valid_mask
-        log_select_gate = torch.log(select_gate) * self.score_std_ema[None, :] * self.log_gate_penalty
+            valid_mask = retrieval_gate > 0.0
+        retrieval_gate = retrieval_gate * valid_mask
+        log_retrieval_gate = torch.log(retrieval_gate) * self.score_std_ema[None, :] * self.log_gate_penalty
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -387,7 +387,7 @@ class SelectiveMHA(nn.Module):
         
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
         
-        cache.update_kv(k_rot, v, log_select_gate)
+        cache.update_kv(k_rot, v, log_retrieval_gate)
 
         if cache.write_idx <= 1:
             return self.out_proj(v.view(batch_size, -1) * out_gate)

@@ -1,6 +1,6 @@
 import torch
 
-class SelectiveAttnCache:
+class MinAttnCache:
     def __init__(self):
         self.k_rot = None   # (batch_size, num_heads, compressed_len, head_dim)
         self.v = None   # (batch_size, num_heads, compressed_len, head_dim)

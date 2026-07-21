@@ -1,6 +1,6 @@
 from .ssm import SSM
-from .selective_attention import SelectiveMHA
-from .cross_selective_attention import CrossSelectiveMHA
+from .minimal_attention import MinMHA
+from .cross_minimal_attention import CrossMinMHA
 from .rms_norm import RMSNorm
 from .feed_forward import SwiGLU
 from .causal_block import CausalBlock
@@ -9,8 +9,8 @@ from .cross_block import CrossBlock
 
 __all__ = [
     "SSM",
-    "SelectiveMHA",
-    "CrossSelectiveMHA",
+    "MinMHA",
+    "CrossMinMHA",
     "RMSNorm",
     "SwiGLU",
     "CausalBlock",

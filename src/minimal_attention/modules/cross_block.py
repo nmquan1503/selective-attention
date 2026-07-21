@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 
 from .ssm import SSM
-from .selective_attention import SelectiveMHA
-from .cross_selective_attention import CrossSelectiveMHA
+from .minimal_attention import MinMHA
+from .cross_minimal_attention import CrossMinMHA
 from .feed_forward import SwiGLU
 from .rms_norm import RMSNorm
 from ..inference import CrossBlockCache, InferenceState, GenerationConfig, AnalysisConfig
@@ -40,14 +40,14 @@ class CrossBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.mha = SelectiveMHA(
+        self.mha = MinMHA(
             layer_idx=layer_idx, 
             dim=model_dim, 
             head_dim=head_dim,
             log_gate_penalty=attn_log_gate_penalty, 
             is_causal=True
         )
-        self.cross_mha = CrossSelectiveMHA(
+        self.cross_mha = CrossMinMHA(
             layer_idx=layer_idx,
             dim=model_dim, 
             head_dim=head_dim,
