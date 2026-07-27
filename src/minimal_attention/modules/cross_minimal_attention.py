@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..inference import CrossSelectiveAttnCache, GenerationConfig, AnalysisConfig
+from ..inference import CrossMinAttnCache, GenerationConfig, AnalysisConfig
 from ..utils.tensor_utils import compress
 
 def _gated_softmax(attn_matrix, gate, is_infer, eps=1e-12):
