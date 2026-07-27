@@ -5,7 +5,8 @@ from .forward_kernel import (
     count_kept_kernel, compact_1_kernel, compact_2_kernel,
     qk_matmul_kernel, fill_self_score_kernel,
     softmax_kernel,
-    attn_output_kernel
+    attn_output_kernel,
+    pack_sequences_kernel, unpack_sequences_kernel
 )
 
 def _compress(
@@ -419,3 +420,112 @@ def varlen_min_self_attn_forward(
 
     return out, k, v, log_gate, cu_seqlens_k
 
+def pack_sequences(
+    x: torch.Tensor,
+    lengths: torch.Tensor,
+):
+    """
+    Args:
+        x: (batch_size, seq_len, dim)
+        lengths: (batch_size,)
+
+    Returns:
+        packed: (total_tokens, dim)
+        cu_seqlens: (batch_size + 1,)
+    """
+    batch_size, seq_len, dim = x.shape
+    lengths = lengths.to(device=x.device, dtype=torch.int32)
+
+    cu_seqlens = torch.cat([
+        torch.zeros(1, dtype=torch.int32, device=x.device),
+        lengths.cumsum(0),
+    ])
+
+    total_tokens = cu_seqlens[-1].item()
+    avg_len = total_tokens // max(1, batch_size)
+    block_t = min(128, triton.next_power_of_2(max(1, avg_len)))
+
+    num_token_blocks = triton.cdiv(lengths, block_t)
+
+    pack_offsets = torch.zeros(batch_size + 1, dtype=torch.int32, device=x.device)
+    pack_offsets[1:] = num_token_blocks.cumsum(0)
+
+    total_blocks = pack_offsets[-1].item()
+    packed = torch.empty(total_tokens, dim, dtype=x.dtype, device=x.device)
+
+    grid = lambda META: (
+        total_blocks,
+        triton.cdiv(dim, META["BLOCK_D"]),
+    )
+
+    pack_sequences_kernel[grid](
+        x, packed,
+        cu_seqlens, pack_offsets,
+        *(x.stride()),
+        *(packed.stride()),
+        B=batch_size,
+        D=dim,
+        BLOCK_T=block_t,
+    )
+
+    return packed, cu_seqlens
+
+
+def unpack_sequences(
+    packed: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+):
+    """
+    Args:
+        packed: (total_tokens, dim)
+        cu_seqlens: (batch_size + 1,)
+
+    Returns:
+        x: (batch_size, max_seq_len, dim)
+    """
+    batch_size = cu_seqlens.numel() - 1
+    total_tokens, dim = packed.shape
+
+    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    max_seq_len = lengths.max().item()
+
+    x = torch.zeros(
+        batch_size,
+        max_seq_len,
+        dim,
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+
+    avg_len = total_tokens // max(1, batch_size)
+    block_t = min(128, triton.next_power_of_2(max(1, avg_len)))
+
+    num_token_blocks = triton.cdiv(lengths, block_t)
+
+    unpack_offsets = torch.zeros(
+        batch_size + 1,
+        dtype=torch.int32,
+        device=packed.device,
+    )
+    unpack_offsets[1:] = num_token_blocks.cumsum(0)
+
+    total_blocks = unpack_offsets[-1].item()
+
+    grid = lambda META: (
+        total_blocks,
+        triton.cdiv(dim, META["BLOCK_D"]),
+    )
+
+    unpack_sequences_kernel[grid](
+        packed,
+        x,
+        cu_seqlens,
+        unpack_offsets,
+        *packed.stride(),
+        *x.stride(),
+        B=batch_size,
+        D=dim,
+        BLOCK_T=block_t,
+    )
+
+    return x

@@ -604,3 +604,198 @@ def attn_output_kernel(
         + offs_d[None, :] * out_d_stride
     )
     tl.store(out_ptrs, acc, mask=(q_mask[:, None] & d_mask[None, :]))
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_D": 32}, num_warps=2),
+        triton.Config({"BLOCK_D": 64}, num_warps=2),
+        triton.Config({"BLOCK_D": 64}, num_warps=4),
+        triton.Config({"BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_D": 128}, num_warps=8),
+        triton.Config({"BLOCK_D": 256}, num_warps=8),
+    ],
+    key=["D", "BLOCK_T"],
+)
+@triton.jit
+def pack_sequences_kernel(
+    x_ptr,                  # (batch_size, seq_len, dim)
+    packed_ptr,             # (total_tokens, dim)
+    cu_seqlens_ptr,         # (batch_size + 1,)
+    pack_offsets_ptr,       # (batch_size + 1,)
+    x_b_stride, x_s_stride, x_d_stride,
+    packed_t_stride, packed_d_stride,
+    B: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    block_id = tl.program_id(0)
+    d_block_id = tl.program_id(1)
+
+    lo, hi = 0, B
+
+    while lo < hi:
+        mid = (lo + hi) // 2
+
+        if tl.load(pack_offsets_ptr + mid) <= block_id:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    b = lo - 1
+    t_block = block_id - tl.load(pack_offsets_ptr + b)
+
+    seq_start = tl.load(cu_seqlens_ptr + b)
+    seq_len = tl.load(cu_seqlens_ptr + b + 1) - seq_start
+
+    t = t_block * BLOCK_T + tl.arange(0, BLOCK_T)
+    d = d_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
+
+    mask = (t[:, None] < seq_len) & (d[None, :] < D)
+
+    x_ptrs = (
+        x_ptr
+        + b * x_b_stride
+        + t[:, None] * x_s_stride
+        + d[None, :] * x_d_stride
+    )
+
+    x = tl.load(x_ptrs, mask=mask, other=0.0)
+
+    packed_ptrs = (
+        packed_ptr
+        + (seq_start + t[:, None]) * packed_t_stride
+        + d[None, :] * packed_d_stride
+    )
+
+    tl.store(packed_ptrs, x, mask=mask)
+
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_D": 32}, num_warps=2),
+        triton.Config({"BLOCK_D": 64}, num_warps=2),
+        triton.Config({"BLOCK_D": 64}, num_warps=4),
+        triton.Config({"BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_D": 128}, num_warps=8),
+        triton.Config({"BLOCK_D": 256}, num_warps=8),
+    ],
+    key=["D", "BLOCK_T"],
+)
+@triton.jit
+def unpack_sequences_kernel(
+    packed_ptr,             # (total_tokens, dim)
+    x_ptr,                  # (batch_size, max_seq_len, dim)
+    cu_seqlens_ptr,         # (batch_size + 1,)
+    unpack_offsets_ptr,     # (batch_size + 1,)
+    packed_t_stride, packed_d_stride,
+    x_b_stride, x_s_stride, x_d_stride,
+    B: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    block_id = tl.program_id(0)
+    d_block_id = tl.program_id(1)
+
+    lo, hi = 0, B
+    while lo < hi:
+        mid = (lo + hi) // 2
+
+        if tl.load(unpack_offsets_ptr + mid) <= block_id:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    b = lo - 1
+    t_block = block_id - tl.load(unpack_offsets_ptr + b)
+
+    seq_start = tl.load(cu_seqlens_ptr + b)
+    seq_len = tl.load(cu_seqlens_ptr + b + 1) - seq_start
+
+    offs_t = t_block * BLOCK_T + tl.arange(0, BLOCK_T)
+    offs_d = d_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
+
+    mask = (offs_t[:, None] < seq_len) & (offs_d[None, :] < D)
+
+    packed_ptrs = (
+        packed_ptr
+        + (seq_start + offs_t[:, None]) * packed_t_stride
+        + offs_d[None, :] * packed_d_stride
+    )
+    val = tl.load(packed_ptrs, mask=mask, other=0.0)
+
+    x_ptrs = (
+        x_ptr
+        + b * x_b_stride
+        + offs_t[:, None] * x_s_stride
+        + offs_d[None, :] * x_d_stride
+    )
+    tl.store(x_ptrs, val, mask=mask)
+
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_D": 32}, num_warps=2),
+        triton.Config({"BLOCK_D": 64}, num_warps=2),
+        triton.Config({"BLOCK_D": 64}, num_warps=4),
+        triton.Config({"BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_D": 128}, num_warps=8),
+        triton.Config({"BLOCK_D": 256}, num_warps=8),
+    ],
+    key=["D", "BLOCK_T"],
+)
+@triton.jit
+def unpack_sequences_kernel(
+    packed_ptr,             # (total_tokens, dim)
+    x_ptr,                  # (batch_size, max_seq_len, dim)
+    cu_seqlens_ptr,         # (batch_size + 1,)
+    unpack_offsets_ptr,     # (batch_size + 1,)
+    packed_t_stride, packed_d_stride,
+    x_b_stride, x_s_stride, x_d_stride,
+    B: tl.constexpr,
+    D: tl.constexpr,
+    MAX_SEQ_LEN: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    block_id = tl.program_id(0)
+    d_block_id = tl.program_id(1)
+
+    lo, hi = 0, B
+    while lo < hi:
+        mid = (lo + hi) // 2
+
+        if tl.load(unpack_offsets_ptr + mid) <= block_id:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    b = lo - 1
+    t_block = block_id - tl.load(unpack_offsets_ptr + b)
+
+    seq_start = tl.load(cu_seqlens_ptr + b)
+    seq_len = tl.load(cu_seqlens_ptr + b + 1) - seq_start
+
+    offs_t = t_block * BLOCK_T + tl.arange(0, BLOCK_T)
+    offs_d = d_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
+
+    mask = (offs_t[:, None] < seq_len) & (offs_d[None, :] < D)
+
+    packed_ptrs = (
+        packed_ptr
+        + (seq_start + offs_t[:, None]) * packed_t_stride
+        + offs_d[None, :] * packed_d_stride
+    )
+    val = tl.load(packed_ptrs, mask=mask, other=0.0)
+
+    x_ptrs = (
+        x_ptr
+        + b * x_b_stride
+        + offs_t[:, None] * x_s_stride
+        + offs_d[None, :] * x_d_stride
+    )
+    tl.store(x_ptrs, val, mask=mask)

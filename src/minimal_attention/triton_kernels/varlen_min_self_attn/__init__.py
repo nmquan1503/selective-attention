@@ -1,3 +1,10 @@
-from .forward import varlen_min_self_attn_forward
-
-__all__ = ["varlen_min_self_attn_forward"]
+from .forward import (
+    varlen_min_self_attn_forward,
+    pack_sequences, 
+    unpack_sequences
+)
+__all__ = [
+    "varlen_min_self_attn_forward",
+    "pack_sequences",
+    "unpack_sequences"
+]
