@@ -192,6 +192,7 @@ def _qk_matmul(
     group_lens: torch.Tensor,
     cu_seqlens_scores: torch.Tensor,
     avg_len: int,
+    scale: float,
 ):
     """
     Args:
@@ -229,6 +230,7 @@ def _qk_matmul(
         *(k_cache.stride()),
         NUM_GROUPS=num_groups,
         NUM_HEADS=num_heads,
+        SCALE=scale,
         D=dim,
         BLOCK_T=block_t,
     )
@@ -314,6 +316,7 @@ def varlen_min_self_attn_decode(
     gate: torch.Tensor,
     scores_std: torch.Tensor,
     log_gate_penalty: float,
+    scale: float,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     log_gate_cache: torch.Tensor,
@@ -356,7 +359,7 @@ def varlen_min_self_attn_decode(
     scores = _qk_matmul(
         q, k_cache, log_gate_cache, 
         cu_seqlens_k, write_pos,
-        group_lens, cu_seqlens_scores, avg_len
+        group_lens, cu_seqlens_scores, avg_len, scale
     )
 
     _softmax(scores, cu_seqlens_scores, avg_len)

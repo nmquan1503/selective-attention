@@ -207,6 +207,7 @@ def qk_matmul_kernel(
     NUM_GROUPS: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
+    SCALE: tl.constexpr,
     D: tl.constexpr,
     BLOCK_Q: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -276,6 +277,8 @@ def qk_matmul_kernel(
         )
 
         scores += tl.dot(q, tl.trans(k))
+
+    scores = scores * SCALE
 
     log_gate = tl.load(
         log_gate_ptr + k_start + offs_k,

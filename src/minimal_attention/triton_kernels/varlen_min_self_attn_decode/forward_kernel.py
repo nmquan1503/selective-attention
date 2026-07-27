@@ -209,6 +209,7 @@ def qk_matmul_kernel(
     k_k_stride, k_d_stride,
     NUM_GROUPS: tl.constexpr,
     NUM_HEADS: tl.constexpr,
+    SCALE: tl.constexpr,
     D: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -270,6 +271,8 @@ def qk_matmul_kernel(
         )
 
         acc += tl.sum(k * q[None, :], axis=1)
+
+    acc = acc * SCALE
 
     log_gate = tl.load(
         log_gate_cache_ptr + src_start + offs_t,

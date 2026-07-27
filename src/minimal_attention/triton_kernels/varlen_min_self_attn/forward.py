@@ -111,6 +111,7 @@ def _qk_matmul(
     k_lens: torch.Tensor,
     avg_q_len: int,
     avg_k_len: int,
+    scale: float,
     is_causal: bool,
 ):
     """
@@ -179,6 +180,7 @@ def _qk_matmul(
         NUM_GROUPS=num_groups,
         NUM_HEADS=num_heads,
         IS_CAUSAL=is_causal,
+        SCALE=scale,
         D=dim,
         BLOCK_Q=block_q_matmul,
         BLOCK_K=block_k_matmul,
@@ -352,6 +354,7 @@ def varlen_min_self_attn_forward(
     gate: torch.Tensor,
     scores_std: torch.Tensor,
     log_gate_penalty: float,
+    scale: float,
     gate_threshold: torch.Tensor | None = None,
     is_causal: bool = True
 ):
@@ -383,7 +386,7 @@ def varlen_min_self_attn_forward(
     else:
         valid_key = torch.ones_like(gate, dtype=torch.bool)
 
-    self_score = (q.unsqueeze(-2) @ k.unsqueeze(-1)).squeeze(-1).squeeze(-1)
+    self_score = (q.unsqueeze(-2) @ k.unsqueeze(-1)).squeeze(-1).squeeze(-1) * scale
 
     original_v = v
     log_gate = torch.log(gate) * scores_std[None, :] * log_gate_penalty
@@ -402,7 +405,7 @@ def varlen_min_self_attn_forward(
         q, k, log_gate, k_ids, self_score, 
         cu_seqlens, cu_seqlens_k,
         q_lens, k_lens, avg_q_len, avg_k_len,
-        is_causal
+        scale, is_causal
     )
 
     _softmax(

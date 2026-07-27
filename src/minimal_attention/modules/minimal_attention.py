@@ -229,6 +229,7 @@ class MinMHA(nn.Module):
                     retrieval_gate, 
                     self.score_std_ema,
                     self.log_gate_penalty, 
+                    self.scale,
                     attn_gate_threshold, 
                     self.is_causal
                 )
@@ -442,7 +443,7 @@ class MinMHA(nn.Module):
             hidden_states, k_cache, v_cache, log_gate_cache, write_pos = (
                 varlen_min_self_attn_decode(
                     q_rot, k_rot, v, retrieval_gate, 
-                    self.score_std_ema, self.log_gate_penalty,
+                    self.score_std_ema, self.log_gate_penalty, self.scale,
                     cache.k_fast, cache.v_fast, cache.log_gate_fast,
                     cache.cu_seqlens_k, cache.write_pos,
                     attn_gate_threshold
