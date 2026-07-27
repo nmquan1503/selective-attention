@@ -66,7 +66,7 @@ class CrossMinMHA(nn.Module):
         context: torch.Tensor,
         context_lengths: torch.Tensor | None = None,
         attn_gate_threshold: torch.Tensor | None = None,
-        cache: CrossSelectiveAttnCache | None = None,
+        cache: CrossMinAttnCache | None = None,
         analysis_cfg: AnalysisConfig | None = None,
         stats: dict | None = None
     ):
@@ -200,7 +200,7 @@ class CrossMinMHA(nn.Module):
     def step(
         self, 
         hidden_states: torch.Tensor, 
-        cache: CrossSelectiveAttnCache,
+        cache: CrossMinAttnCache,
         gen_cfg: GenerationConfig,
         analysis_cfg: AnalysisConfig | None = None,
         stats: dict | None = None
