@@ -405,7 +405,7 @@ class MinMHA(nn.Module):
             hidden_states: (batch_size, model_dim)
         """
 
-        batch_size, _ = hidden_states.shape
+        batch_size, dim = hidden_states.shape
         device = hidden_states.device
         attn_gate_threshold = gen_cfg.attn_gate_thresholds[self.layer_idx] if gen_cfg.attn_gate_thresholds is not None else None
 
@@ -449,6 +449,7 @@ class MinMHA(nn.Module):
                 )
             )
 
+            hidden_states = hidden_states.view(-1, dim)
             hidden_states = self.out_proj(hidden_states * out_gate)
 
             cache.build_fast(
