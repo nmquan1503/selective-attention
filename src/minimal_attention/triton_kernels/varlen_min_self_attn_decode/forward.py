@@ -1,5 +1,6 @@
 import torch
 import triton
+import math
 
 from .forward_kernel import (
     append_kv_cache_kernel,
@@ -125,7 +126,7 @@ def pad_buffer(
         return k_cache, v_cache, log_gate_cache, cu_seqlens_k, write_pos
 
 
-    avg_len = real_lens[real_lens > 0].float().mean().item()
+    avg_len = math.ceil(real_lens[real_lens > 0].float().mean().item())
     block_t = min(256, triton.next_power_of_2(avg_len))
 
     num_blocks = triton.cdiv(real_lens, block_t)
@@ -189,7 +190,7 @@ def _qk_matmul(
     write_pos: torch.Tensor,
     group_lens: torch.Tensor,
     cu_seqlens_scores: torch.Tensor,
-    avg_len: float,
+    avg_len: int,
 ):
     """
     Args:
@@ -236,7 +237,7 @@ def _qk_matmul(
 def _softmax(
     scores: torch.Tensor,
     cu_seqlens_scores: torch.Tensor,
-    avg_len: float,
+    avg_len: int,
 ):
     """
     Args:
@@ -264,7 +265,7 @@ def _attn_output(
     v_cache: torch.Tensor,
     cu_seqlens_scores: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
-    avg_len: float,
+    avg_len: int,
     num_seqs: int,
     num_heads: int,
 ):
@@ -349,7 +350,7 @@ def varlen_min_self_attn_decode(
     group_lens = write_pos - cu_seqlens_k[:-1] + 1
     cu_seqlens_scores = torch.zeros(num_groups + 1, dtype=torch.int32, device=q.device)
     cu_seqlens_scores[1:] = torch.cumsum(group_lens, dim=0)
-    avg_len = group_lens.float().mean().item()
+    avg_len = math.ceil(group_lens.float().mean().item())
 
     scores = _qk_matmul(
         q, k_cache, log_gate_cache, 
