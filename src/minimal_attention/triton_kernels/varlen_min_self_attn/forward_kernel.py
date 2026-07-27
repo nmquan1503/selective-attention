@@ -758,7 +758,6 @@ def unpack_sequences_kernel(
     x_b_stride, x_s_stride, x_d_stride,
     B: tl.constexpr,
     D: tl.constexpr,
-    MAX_SEQ_LEN: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
