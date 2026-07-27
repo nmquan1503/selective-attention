@@ -379,7 +379,7 @@ def varlen_min_self_attn_forward(
     if gate_threshold is not None:
         valid_key = (gate >= gate_threshold) & (gate > 0)
         if not valid_key.any():
-            return v
+            return v, None, None, None, None
     else:
         valid_key = torch.ones_like(gate, dtype=torch.bool)
 

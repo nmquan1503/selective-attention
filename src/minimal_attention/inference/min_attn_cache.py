@@ -7,6 +7,12 @@ class MinAttnCache:
         self.log_gate = None    # (batch_size, num_heads, compressed_len)
         self.write_idx = 0
 
+        self.k_fast = None
+        self.v_fast = None
+        self.log_gate_fast = None
+        self.cu_seqlens_k = None
+        self.write_pos = None
+
     def build_kv(
         self,
         k_rot: torch.Tensor,
@@ -40,3 +46,17 @@ class MinAttnCache:
         self.v[:, :, self.write_idx, :] = v
         self.log_gate[:, :, self.write_idx] = log_gate
         self.write_idx += 1
+
+    def build_fast(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        log_gate: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        write_pos: torch.Tensor
+    ):
+        self.k_fast = k
+        self.v_fast = v
+        self.log_gate_fast = log_gate
+        self.cu_seqlens_k = cu_seqlens_k
+        self.write_pos = write_pos

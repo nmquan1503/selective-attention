@@ -7,6 +7,14 @@ from ..inference import MinAttnCache, InferenceState, GenerationConfig, Analysis
 from .rope import RoPE
 from .rms_norm import RMSNorm
 from ..utils.tensor_utils import compress, pad_buffer
+from ..triton_kernels import (
+    varlen_min_self_attn_init_buffer,
+    varlen_min_self_attn_pad_buffer,
+    varlen_min_self_attn_pack_seqs,
+    varlen_min_self_attn_unpack_seqs,
+    varlen_min_self_attn_forward,
+    varlen_min_self_attn_decode
+)
 
 def _reset_cache(cache: MinAttnCache, buffer_size: int):
     valid_mask = ~torch.isinf(cache.log_gate)
@@ -150,7 +158,8 @@ class MinMHA(nn.Module):
         dim: int, 
         head_dim: int,
         log_gate_penalty: float,
-        is_causal: bool
+        is_causal: bool,
+        fast: bool = True,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -162,6 +171,7 @@ class MinMHA(nn.Module):
         self.is_causal = is_causal
         self.scale = self.head_dim ** -0.5
         self.log_gate_penalty = log_gate_penalty
+        self.fast = fast
 
         self.gate_proj = nn.Linear(dim, self.num_heads + dim)
         self.rope = RoPE(self.head_dim)
@@ -192,10 +202,50 @@ class MinMHA(nn.Module):
         Returns:
             hidden_states: (batch_size, seq_len, dim)
         """
-        batch_size, seq_len, _ = hidden_states.shape
+        batch_size, seq_len, dim = hidden_states.shape
         device = hidden_states.device
         is_infer = not self.training
         is_prefill = is_infer and self.is_causal and cache is not None
+
+        if is_prefill and self.fast:
+            hidden_states, cu_seqlens = varlen_min_self_attn_pack_seqs(hidden_states, lengths)
+
+            gate = torch.sigmoid(self.gate_proj(hidden_states))
+            retrieval_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
+            retrieval_gate = retrieval_gate.contiguous()
+
+            q = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            k = self.k_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            v = self.v_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+
+            position_ids = torch.arange(q.shape[0], device=q.device)
+            position_ids -= torch.repeat_interleave(cu_seqlens[:-1], lengths)
+
+            q, k = self.rope(q, k, position_ids, mode="pos")
+    
+            hidden_states, k_cache, v_cache, log_gate_cache, cu_seqlens_k = (
+                varlen_min_self_attn_forward(
+                    q, k, v, cu_seqlens, 
+                    retrieval_gate, 
+                    self.score_std_ema,
+                    self.log_gate_penalty, 
+                    attn_gate_threshold, 
+                    self.is_causal
+                )
+            )
+
+            hidden_states = hidden_states.view(-1, dim)
+            hidden_states = self.out_proj(hidden_states * out_gate)
+
+            hidden_states = varlen_min_self_attn_unpack_seqs(hidden_states, cu_seqlens)
+
+            write_pos = cu_seqlens_k[1:].clone().contiguous() if cu_seqlens_k is not None else None
+            cache.build_fast(
+                k_cache, v_cache, log_gate_cache,
+                cu_seqlens_k, write_pos
+            )
+
+            return hidden_states
 
         gate = torch.sigmoid(self.gate_proj(hidden_states))
         retrieval_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
@@ -358,6 +408,55 @@ class MinMHA(nn.Module):
         batch_size, _ = hidden_states.shape
         device = hidden_states.device
         attn_gate_threshold = gen_cfg.attn_gate_thresholds[self.layer_idx] if gen_cfg.attn_gate_thresholds is not None else None
+
+        if self.fast:
+            if state.step % gen_cfg.cache_update_interval == 0:
+                if cache.k_fast is None:
+                    k_cache, v_cache, log_gate_cache, cu_seqlens_k, write_pos = (
+                        varlen_min_self_attn_init_buffer(
+                            batch_size * self.num_heads, self.head_dim,
+                            gen_cfg.cache_update_interval,
+                            device, hidden_states.dtype
+                        )
+                    )
+                else:
+                    k_cache, v_cache, log_gate_cache, cu_seqlens_k, write_pos = (
+                        varlen_min_self_attn_pad_buffer(
+                            cache.k_fast, cache.v_fast, cache.log_gate_fast,
+                            cache.cu_seqlens_k, cache.write_pos,
+                            gen_cfg.cache_update_interval
+                        )
+                    )
+                cache.build_fast(k_cache, v_cache, log_gate_cache, cu_seqlens_k, write_pos)
+
+            gate = torch.sigmoid(self.gate_proj(hidden_states))
+            retrieval_gate, out_gate = torch.split(gate, [self.num_heads, self.dim], dim=-1)
+            retrieval_gate = retrieval_gate.contiguous()
+
+            q = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            k = self.k_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            v = self.v_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+
+            q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
+
+            hidden_states, k_cache, v_cache, log_gate_cache, write_pos = (
+                varlen_min_self_attn_decode(
+                    q_rot, k_rot, v, retrieval_gate, 
+                    self.score_std_ema, self.log_gate_penalty,
+                    cache.k_fast, cache.v_fast, cache.log_gate_fast,
+                    cache.cu_seqlens_k, cache.write_pos,
+                    attn_gate_threshold
+                )
+            )
+
+            hidden_states = self.out_proj(hidden_states * out_gate)
+
+            cache.build_fast(
+                k_cache, v_cache, log_gate_cache,
+                cache.cu_seqlens_k, write_pos
+            )
+
+            return hidden_states
 
         if state.step % gen_cfg.cache_update_interval == 0:
             if cache.k_rot is None:
