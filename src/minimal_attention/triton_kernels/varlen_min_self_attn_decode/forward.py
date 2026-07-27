@@ -176,6 +176,7 @@ def pad_buffer(
         pad_offsets,
         *(k_cache.stride()),
         *(k_out.stride()),
+        NUM_GROUPS=num_groups,
         D=dim,
         BLOCK_T=block_t,
     )
