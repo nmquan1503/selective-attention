@@ -372,7 +372,7 @@ def varlen_min_self_attn_decode(
     )
 
     if gate_threshold is not None:
-        write_pos += valid.to(write_pos.dtype)
+        write_pos += valid.reshape(-1).to(write_pos.dtype)
     else:
         write_pos += 1
 
