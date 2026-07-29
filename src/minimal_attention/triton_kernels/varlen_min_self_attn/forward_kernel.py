@@ -37,62 +37,6 @@ def count_kept_kernel(
 
 
 
-@triton.jit
-def compact_1_kernel(
-    log_gate_ptr,       # (total_tokens, num_heads)
-    valid_ptr,          # (total_tokens, num_heads)
-    cu_seqlens_ptr,     # (num_seqs + 1,)
-    cu_seqlens_k_ptr,   # (num_groups + 1,)
-    log_gate_out_ptr,   # (total_keys,)
-    k_ids_out_ptr,      # (total_keys,)
-    log_gate_t_stride, log_gate_h_stride,
-    NUM_HEADS: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-):
-    seq_id = tl.program_id(0)
-    head_id = tl.program_id(1)
-
-    seq_start = tl.load(cu_seqlens_ptr + seq_id)
-    seq_end = tl.load(cu_seqlens_ptr + seq_id + 1)
-    seq_len = seq_end - seq_start
-
-    group_id = seq_id * NUM_HEADS + head_id
-    out_start = tl.load(cu_seqlens_k_ptr + group_id)
-
-    offs_t_base = tl.arange(0, BLOCK_T)
-    out_idx = 0
-
-    for block_start in range(0, seq_len, BLOCK_T):
-        offs_t = block_start + offs_t_base
-        mask_t = offs_t < seq_len
-        input_pos = seq_start + offs_t
-
-        valid = tl.load(
-            valid_ptr
-            + input_pos * log_gate_t_stride
-            + head_id * log_gate_h_stride,
-            mask=mask_t,
-            other=False,
-        )
-        log_gate = tl.load(
-            log_gate_ptr
-            + input_pos * log_gate_t_stride
-            + head_id * log_gate_h_stride,
-            mask=mask_t,
-            other=0.0,
-        )
-
-        valid_i32 = valid.to(tl.int32)
-        rank = tl.cumsum(valid_i32, axis=0) - 1
-        out_pos = out_start + out_idx + rank
-
-        tl.store(log_gate_out_ptr + out_pos, log_gate, mask=valid)
-        tl.store(k_ids_out_ptr + out_pos, input_pos, mask=valid)
-
-        out_idx += tl.sum(valid_i32, axis=0)
-
-
-
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_D": 32}, num_warps=2),
@@ -105,14 +49,19 @@ def compact_1_kernel(
     key=["D", "BLOCK_T"],
 )
 @triton.jit
-def compact_2_kernel(
-    k_ptr,              # (total_tokens, num_heads, dim)
-    v_ptr,              # (total_tokens, num_heads, dim)
-    k_ids_ptr,          # (total_keys,)
-    cu_seqlens_k_ptr,   # (num_groups + 1,)
-    k_out_ptr,          # (total_keys, dim)
-    v_out_ptr,          # (total_keys, dim)
+def compact_kernel(
+    k_ptr,              # (total_tokens, num_heads, D)
+    v_ptr,              # (total_tokens, num_heads, D)
+    log_gate_ptr,       # (total_tokens, num_heads)
+    valid_ptr,          # (total_tokens, num_heads)
+    cu_seqlens_ptr,     # (num_seqs + 1)
+    cu_seqlens_k_ptr,   # (num_groups + 1)
+    k_out_ptr,          # (total_keys, D)
+    v_out_ptr,          # (total_keys, D)
+    log_gate_out_ptr,   # (total_keys)
+    k_ids_out_ptr,      # (total_keys)
     k_t_stride, k_h_stride, k_d_stride,
+    log_gate_t_stride, log_gate_h_stride,
     NUM_HEADS: tl.constexpr,
     D: tl.constexpr,
     BLOCK_T: tl.constexpr,
@@ -122,57 +71,50 @@ def compact_2_kernel(
     head_id = tl.program_id(1)
     d_block_id = tl.program_id(2)
 
+    seq_start = tl.load(cu_seqlens_ptr + seq_id)
+    seq_len = tl.load(cu_seqlens_ptr + seq_id + 1) - seq_start
+
     group_id = seq_id * NUM_HEADS + head_id
     out_start = tl.load(cu_seqlens_k_ptr + group_id)
-    out_end = tl.load(cu_seqlens_k_ptr + group_id + 1)
-    num_keys = out_end - out_start
-
-    d_start = d_block_id * BLOCK_D
-    offs_d = d_start + tl.arange(0, BLOCK_D)
-    mask_d = offs_d < D
 
     offs_t_base = tl.arange(0, BLOCK_T)
-    for block_start in range(0, num_keys, BLOCK_T):
+    offs_d = d_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask_d = offs_d < D
+
+    out_idx = 0
+
+    for block_start in range(0, seq_len, BLOCK_T):
         offs_t = block_start + offs_t_base
-        out_pos = out_start + offs_t
-        mask_t = out_pos < out_end
+        input_pos = seq_start + offs_t
+        mask_t = offs_t < seq_len
 
-        original_idx = tl.load(k_ids_ptr + out_pos, mask=mask_t, other=0)
-
-        k_ptrs = (
-            k_ptr
-            + original_idx[:, None] * k_t_stride
-            + head_id * k_h_stride
-            + offs_d[None, :] * k_d_stride
+        valid = tl.load(
+            valid_ptr + input_pos * log_gate_t_stride + head_id * log_gate_h_stride,
+            mask=mask_t, other=False,
         )
 
-        v_ptrs = (
-            v_ptr
-            + original_idx[:, None] * k_t_stride
-            + head_id * k_h_stride
-            + offs_d[None, :] * k_d_stride
-        )
+        valid_i32 = valid.to(tl.int32)
+        out_pos = out_start + out_idx + tl.cumsum(valid_i32, axis=0) - 1
+        out_idx += tl.sum(valid_i32, axis=0)
 
-        k_out_ptrs = (
-            k_out_ptr
-            + out_pos[:, None] * D
-            + offs_d[None, :]
-        )
+        mask = mask_t[:, None] & valid[:, None] & mask_d[None, :]
 
-        v_out_ptrs = (
-            v_out_ptr
-            + out_pos[:, None] * D
-            + offs_d[None, :]
-        )
+        k_ptrs = k_ptr + input_pos[:, None] * k_t_stride + head_id * k_h_stride + offs_d[None, :] * k_d_stride
+        v_ptrs = v_ptr + input_pos[:, None] * k_t_stride + head_id * k_h_stride + offs_d[None, :] * k_d_stride
 
-        mask = mask_t[:, None] & mask_d[None, :]
+        k_out_ptrs = k_out_ptr + out_pos[:, None] * D + offs_d[None, :]
+        v_out_ptrs = v_out_ptr + out_pos[:, None] * D + offs_d[None, :]
 
-        k_val = tl.load(k_ptrs, mask=mask, other=0.0)
-        v_val = tl.load(v_ptrs, mask=mask, other=0.0)
+        tl.store(k_out_ptrs, tl.load(k_ptrs, mask=mask, other=0.0), mask=mask)
+        tl.store(v_out_ptrs, tl.load(v_ptrs, mask=mask, other=0.0), mask=mask)
 
-        tl.store(k_out_ptrs, k_val, mask=mask)
-        tl.store(v_out_ptrs, v_val, mask=mask)
-
+        if d_block_id == 0:
+            log_gate = tl.load(
+                log_gate_ptr + input_pos * log_gate_t_stride + head_id * log_gate_h_stride,
+                mask=mask_t, other=0.0,
+            )
+            tl.store(log_gate_out_ptr + out_pos, log_gate, mask=valid)
+            tl.store(k_ids_out_ptr + out_pos, input_pos, mask=valid)
 
 
 @triton.autotune(

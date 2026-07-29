@@ -2,7 +2,7 @@ import torch
 import triton
 
 from .forward_kernel import (
-    count_kept_kernel, compact_1_kernel, compact_2_kernel,
+    count_kept_kernel, compact_kernel,
     qk_matmul_kernel, fill_self_score_kernel,
     softmax_kernel,
     attn_output_kernel,
@@ -17,7 +17,7 @@ def _compress(
     cu_seqlens: torch.Tensor,
 ):
     """
-    Args: 
+    Args:
         k, v: (total_tokens, num_heads, dim)
         log_gate, valid: (total_tokens, num_heads)
         cu_seqlens: (num_seqs + 1,)
@@ -30,71 +30,42 @@ def _compress(
 
     total_tokens, num_heads, dim = k.shape
     num_seqs = cu_seqlens.numel() - 1
-    avg_seqlen = total_tokens // num_seqs
-    block_t = min(256, triton.next_power_of_2(avg_seqlen))
 
-    counts = torch.empty(
-        (num_seqs, num_heads), 
-        device=k.device, dtype=torch.int32
-    )
+    block_t = max(32, min(256, triton.next_power_of_2(total_tokens // num_seqs)))
+
+    counts = torch.empty((num_seqs, num_heads), device=k.device, dtype=torch.int32)
     count_kept_kernel[(num_seqs, num_heads)](
         valid, cu_seqlens, counts,
-        *(valid.stride()),
-        BLOCK_T=max(block_t, 32),
+        *valid.stride(),
+        BLOCK_T=block_t,
         NUM_HEADS=num_heads,
-        num_warps=max(1, block_t // 32)
+        num_warps=max(1, block_t // 32),
     )
 
-    counts_flat = counts.reshape(-1)
-    cu_seqlens_k = torch.empty(
-        num_seqs * num_heads + 1, 
-        device=k.device, dtype=torch.int32
-    )
+    cu_seqlens_k = torch.empty(num_seqs * num_heads + 1, device=k.device, dtype=torch.int32)
     cu_seqlens_k[0] = 0
-    cu_seqlens_k[1:] = torch.cumsum(counts_flat, dim=0)
+    cu_seqlens_k[1:] = counts.reshape(-1).cumsum(0)
 
     total_keys = cu_seqlens_k[-1].item()
-    k_out = torch.empty(
-        (total_keys, dim), 
-        device=k.device, dtype=k.dtype
-    )
-    v_out = torch.empty(
-        (total_keys, dim), 
-        device=v.device, dtype=v.dtype
-    )
-    log_gate_out = torch.empty(
-        total_keys, 
-        device=log_gate.device, dtype=log_gate.dtype
-    )
-    k_ids = torch.empty(
-        total_keys, 
-        device=k.device, dtype=torch.int32
-    )
-    compact_1_kernel[
-        (num_seqs, num_heads)
-    ](
-        log_gate, valid,
-        cu_seqlens, cu_seqlens_k,
-        log_gate_out, k_ids,
-        *(log_gate.stride()),
-        NUM_HEADS=num_heads,
-        BLOCK_T=max(block_t, 32),
-        num_warps=max(1, block_t // 32)
-    )
 
-    grid = lambda META: (
-        num_seqs, 
-        num_heads, 
-        triton.cdiv(dim, META["BLOCK_D"])
-    )
-    compact_2_kernel[grid](
-        k, v, k_ids,
-        cu_seqlens_k,
-        k_out, v_out,
-        *(k.stride()),
+    k_out = torch.empty((total_keys, dim), device=k.device, dtype=k.dtype)
+    v_out = torch.empty_like(k_out)
+    log_gate_out = torch.empty(total_keys, device=k.device, dtype=log_gate.dtype)
+    k_ids = torch.empty(total_keys, device=k.device, dtype=torch.int32)
+
+    compact_kernel[lambda META: (
+        num_seqs,
+        num_heads,
+        triton.cdiv(dim, META["BLOCK_D"]),
+    )](
+        k, v, log_gate, valid,
+        cu_seqlens, cu_seqlens_k,
+        k_out, v_out, log_gate_out, k_ids,
+        *k.stride(),
+        *log_gate.stride(),
         NUM_HEADS=num_heads,
         D=dim,
-        BLOCK_T=block_t
+        BLOCK_T=block_t,
     )
 
     return k_out, v_out, log_gate_out, k_ids, cu_seqlens_k
