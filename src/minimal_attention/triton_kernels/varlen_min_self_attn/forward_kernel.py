@@ -117,438 +117,144 @@ def compact_kernel(
             tl.store(k_ids_out_ptr + out_pos, input_pos, mask=valid)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_D": 32}, num_warps=2),
-        triton.Config({"BLOCK_D": 32}, num_warps=4),
 
-        triton.Config({"BLOCK_D": 64}, num_warps=2),
-        triton.Config({"BLOCK_D": 64}, num_warps=4),
-        triton.Config({"BLOCK_D": 64}, num_warps=8),
-
-        triton.Config({"BLOCK_D": 128}, num_warps=4),
-        triton.Config({"BLOCK_D": 128}, num_warps=8),
-    ],
-    key=["D", "BLOCK_Q", "BLOCK_K"],
-)
 @triton.jit
-def qk_matmul_kernel(
-    q_ptr,                  # (total_tokens, num_heads, dim)
-    k_ptr,                  # (total_keys, dim)
-    log_gate_ptr,           # (total_keys,)
-    k_ids_ptr,              # (total_keys,)
-    scores_ptr,             # (total_scores,)
-    cu_seqlens_ptr,         # (num_seqs + 1,)
-    cu_seqlens_k_ptr,       # (num_groups + 1,)
-    cu_seqlens_scores_ptr,  # (num_groups + 1,)
-    qk_offsets_ptr,         # (num_groups + 1,)
-    q_lens_ptr,             # (num_groups,)
-    k_lens_ptr,             # (num_groups,)
+def min_self_attn_kernel(
+    q_ptr,              # (total_tokens, num_heads, dim)
+    k_ptr,              # (total_keys, dim)
+    v_ptr,              # (total_keys, dim)
+    log_gate_ptr,       # (total_keys,)
+    k_ids_ptr,          # (total_keys,)
+    self_score_ptr,     # (total_tokens, num_heads)
+    orig_v_ptr,         # (total_tokens, num_heads, dim)
+    out_ptr,            # (total_tokens, num_heads, dim)
+    cu_seqlens_ptr,     # (num_seqs + 1,)
+    cu_seqlens_k_ptr,   # (num_groups + 1,)
     q_t_stride, q_h_stride, q_d_stride,
     k_k_stride, k_d_stride,
-    NUM_GROUPS: tl.constexpr,
+    v_k_stride, v_d_stride,
+    orig_v_t_stride, orig_v_h_stride, orig_v_d_stride,
+    out_t_stride, out_h_stride, out_d_stride,
+    self_t_stride, self_h_stride,
     NUM_HEADS: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     SCALE: tl.constexpr,
     D: tl.constexpr,
     BLOCK_Q: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    BLOCK_D: tl.constexpr,
 ):
-    global_block_id = tl.program_id(0)
-
-    lo = 0
-    hi = NUM_GROUPS
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if tl.load(qk_offsets_ptr + mid) <= global_block_id:
-            lo = mid + 1
-        else:
-            hi = mid
-
-    group_id = lo - 1
-    group_block_id = global_block_id - tl.load(qk_offsets_ptr + group_id)
-
-    q_len = tl.load(q_lens_ptr + group_id)
-    k_len = tl.load(k_lens_ptr + group_id)
-
-    num_k_blocks = tl.cdiv(k_len, BLOCK_K)
-    q_block_id = group_block_id // num_k_blocks
-    k_block_id = group_block_id % num_k_blocks
-
-    seq_id = group_id // NUM_HEADS
-    head_id = group_id % NUM_HEADS
+    seq_id = tl.program_id(0)
+    head_id = tl.program_id(1)
+    q_block_id = tl.program_id(2)
+    group_id = seq_id * NUM_HEADS + head_id
 
     q_start = tl.load(cu_seqlens_ptr + seq_id)
+    q_end = tl.load(cu_seqlens_ptr + seq_id + 1)
+    q_len = q_end - q_start
+
+    if q_block_id * BLOCK_Q >= q_len:
+        return
+
     k_start = tl.load(cu_seqlens_k_ptr + group_id)
+    k_end = tl.load(cu_seqlens_k_ptr + group_id + 1)
+    k_len = k_end - k_start
 
     offs_q = q_block_id * BLOCK_Q + tl.arange(0, BLOCK_Q)
-    offs_k = k_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
-    offs_d_base = tl.arange(0, BLOCK_D)
+    offs_d = tl.arange(0, D)
 
-    q_mask = offs_q < q_len
-    k_mask = offs_k < k_len
+    mask_q = offs_q < q_len
+    q_ids = q_start + offs_q
 
-    scores = tl.zeros((BLOCK_Q, BLOCK_K), dtype=tl.float32)
-
-    for d_start in range(0, D, BLOCK_D):
-        offs_d = d_start + offs_d_base
-        d_mask = offs_d < D
-
-        q_ptrs = (
-            q_ptr
-            + (q_start + offs_q[:, None]) * q_t_stride
-            + head_id * q_h_stride
-            + offs_d[None, :] * q_d_stride
-        )
-        q = tl.load(
-            q_ptrs,
-            mask=q_mask[:, None] & d_mask[None, :],
-            other=0.0,
-        )
-
-        k_ptrs = (
-            k_ptr
-            + (k_start + offs_k[:, None]) * k_k_stride
-            + offs_d[None, :] * k_d_stride
-        )
-        k = tl.load(
-            k_ptrs,
-            mask=k_mask[:, None] & d_mask[None, :],
-            other=0.0,
-        )
-
-        scores += tl.dot(q, tl.trans(k))
-
-    scores = scores * SCALE
-
-    log_gate = tl.load(
-        log_gate_ptr + k_start + offs_k,
-        mask=k_mask,
+    q = tl.load(
+        q_ptr
+        + q_ids[:, None] * q_t_stride
+        + head_id * q_h_stride
+        + offs_d[None, :] * q_d_stride,
+        mask=mask_q[:, None],
         other=0.0,
     )
-    scores += log_gate[None, :]
 
-    q_global_idx = q_start + offs_q
-    k_global_idx = tl.load(
-        k_ids_ptr + k_start + offs_k,
-        mask=k_mask,
-        other=-1,
-    )
-
-    if IS_CAUSAL:
-        allowed_mask = (
-            k_global_idx[None, :]
-            < q_global_idx[:, None]
-        )
-    else:
-        allowed_mask = (
-            k_global_idx[None, :]
-            != q_global_idx[:, None]
-        )
-
-    scores = tl.where(allowed_mask, scores, float("-inf"))
-
-    scores_start = tl.load(cu_seqlens_scores_ptr + group_id)
-    output_width = k_len + 1
-
-    scores_ptrs = (
-        scores_ptr
-        + scores_start
-        + offs_q[:, None] * output_width
-        + offs_k[None, :]
-        + 1
-    )
-
-    scores_mask = q_mask[:, None] & k_mask[None, :]
-    tl.store(scores_ptrs, scores, mask=scores_mask)
-
-
-
-@triton.jit
-def fill_self_score_kernel(
-    self_score_ptr,         # (total_tokens, num_heads)
-    scores_ptr,             # (total_scores,)
-    cu_seqlens_ptr,         # (num_seqs + 1,)
-    cu_seqlens_scores_ptr,  # (num_groups + 1,)
-    fill_block_offsets_ptr, # (num_groups + 1,)
-    q_lens_ptr,             # (num_groups,)
-    k_lens_ptr,             # (num_groups,)
-    self_t_stride, self_h_stride,
-    NUM_GROUPS: tl.constexpr,
-    NUM_HEADS: tl.constexpr,
-    BLOCK_Q: tl.constexpr,
-):
-    global_block_id = tl.program_id(0)
-    lo = 0
-    hi = NUM_GROUPS
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if tl.load(fill_block_offsets_ptr + mid) <= global_block_id:
-            lo = mid + 1
-        else:
-            hi = mid
-
-    group_id = lo - 1
-    group_block_id = global_block_id - tl.load(fill_block_offsets_ptr + group_id)
-
-    q_len = tl.load(q_lens_ptr + group_id)
-    k_len = tl.load(k_lens_ptr + group_id)
-    output_width = k_len + 1
-
-    seq_id = group_id // NUM_HEADS
-    head_id = group_id % NUM_HEADS
-    q_start = tl.load(cu_seqlens_ptr + seq_id)
-
-    offs_q = group_block_id * BLOCK_Q + tl.arange(0, BLOCK_Q)
-    q_mask = offs_q < q_len
-
-    self_score_ptrs = (
-        self_score_ptr
-        + (q_start + offs_q) * self_t_stride
-        + head_id * self_h_stride
-    )
     self_score = tl.load(
-        self_score_ptrs,
-        mask=q_mask,
+        self_score_ptr
+        + q_ids * self_t_stride
+        + head_id * self_h_stride,
+        mask=mask_q,
+        other=-float("inf"),
+    ) * SCALE
+
+    row_max = self_score
+    row_sum_exp = tl.exp(self_score - row_max)
+
+    orig_v = tl.load(
+        orig_v_ptr
+        + q_ids[:, None] * orig_v_t_stride
+        + head_id * orig_v_h_stride
+        + offs_d[None, :] * orig_v_d_stride,
+        mask=mask_q[:, None],
         other=0.0,
     )
 
-    scores_start = tl.load(cu_seqlens_scores_ptr + group_id)
-    scores_ptrs = (
-        scores_ptr
-        + scores_start
-        + offs_q * output_width
-    )
-
-    tl.store(scores_ptrs, self_score, mask=q_mask)
-
-
-
-@triton.jit
-def softmax_kernel(
-    scores_ptr,                     # (total_scores,)
-    cu_seqlens_scores_ptr,          # (num_groups + 1,)
-    softmax_block_offsets_ptr,      # (num_groups + 1,)
-    q_lens_ptr,                     # (num_groups,)
-    k_lens_ptr,                     # (num_groups,)
-    NUM_GROUPS: tl.constexpr,
-    BLOCK_Q: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    global_block_id = tl.program_id(0)
-
-    lo, hi = 0, NUM_GROUPS
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if tl.load(softmax_block_offsets_ptr + mid) <= global_block_id:
-            lo = mid + 1
-        else:
-            hi = mid
-
-    group_id = lo - 1
-    group_block_id = global_block_id - tl.load(softmax_block_offsets_ptr + group_id)
-
-    q_len = tl.load(q_lens_ptr + group_id)
-    k_len = tl.load(k_lens_ptr + group_id)
-    output_width = k_len + 1 
-    scores_start = tl.load(cu_seqlens_scores_ptr + group_id)
-
-    offs_q = group_block_id * BLOCK_Q + tl.arange(0, BLOCK_Q)
-    q_mask = offs_q < q_len
-
-    row_max = tl.full((BLOCK_Q,), value=float("-inf"), dtype=tl.float32)
-    for k_start_local in range(0, output_width, BLOCK_K):
-        offs_k = k_start_local + tl.arange(0, BLOCK_K)
-        k_mask = offs_k < output_width
-
-        scores_ptrs = (
-            scores_ptr
-            + scores_start
-            + offs_q[:, None] * output_width
-            + offs_k[None, :]
-        )
-        scores = tl.load(
-            scores_ptrs,
-            mask=q_mask[:, None] & k_mask[None, :],
-            other=-float("inf"),
-        )
-
-        block_max = tl.max(scores, axis=1)
-        row_max = tl.maximum(row_max, block_max)
-
-    row_sum = tl.zeros((BLOCK_Q,), dtype=tl.float32)
-    for k_start_local in range(0, output_width, BLOCK_K):
-        offs_k = k_start_local + tl.arange(0, BLOCK_K)
-        k_mask = offs_k < output_width
-
-        scores_ptrs = (
-            scores_ptr
-            + scores_start
-            + offs_q[:, None] * output_width
-            + offs_k[None, :]
-        )
-        scores = tl.load(
-            scores_ptrs,
-            mask=q_mask[:, None] & k_mask[None, :],
-            other=-float("inf"),
-        )
-
-        exp_scores = tl.exp(scores - row_max[:, None])
-        row_sum += tl.sum(exp_scores, axis=1)
-
-    inv_row_sum = 1.0 / row_sum
-    for k_start_local in range(0, output_width, BLOCK_K):
-        offs_k = k_start_local + tl.arange(0, BLOCK_K)
-        k_mask = offs_k < output_width
-
-        scores_ptrs = (
-            scores_ptr
-            + scores_start
-            + offs_q[:, None] * output_width
-            + offs_k[None, :]
-        )
-        scores = tl.load(
-            scores_ptrs,
-            mask=q_mask[:, None] & k_mask[None, :],
-            other=float("-inf"),
-        )
-
-        probs = tl.exp(scores - row_max[:, None]) * inv_row_sum[:, None]
-        tl.store(scores_ptrs, probs, mask=(q_mask[:, None] & k_mask[None, :]))
-
-
-
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_D": 32}, num_warps=2),
-        triton.Config({"BLOCK_D": 32}, num_warps=4),
-
-        triton.Config({"BLOCK_D": 64}, num_warps=2),
-        triton.Config({"BLOCK_D": 64}, num_warps=4),
-        triton.Config({"BLOCK_D": 64}, num_warps=8),
-
-        triton.Config({"BLOCK_D": 128}, num_warps=4),
-        triton.Config({"BLOCK_D": 128}, num_warps=8),
-
-        triton.Config({"BLOCK_D": 256}, num_warps=8),
-    ],
-    key=["D", "BLOCK_Q", "BLOCK_K"],
-)
-@triton.jit
-def attn_output_kernel(
-    scores_ptr,                 # (total_scores,)
-    original_v_ptr,             # (total_tokens, num_heads, dim)
-    v_ptr,                      # (total_keys, dim)
-    out_ptr,                    # (total_tokens, num_heads, dim)
-    cu_seqlens_ptr,             # (num_seqs + 1,)
-    cu_seqlens_k_ptr,           # (num_groups + 1,)
-    cu_seqlens_scores_ptr,      # (num_groups + 1,)
-    attn_block_offsets_ptr,     # (num_groups + 1,)
-    q_lens_ptr,                 # (num_groups,)
-    k_lens_ptr,                 # (num_groups,)
-    original_v_t_stride, original_v_h_stride, original_v_d_stride,
-    v_t_stride, v_d_stride,
-    out_t_stride, out_h_stride, out_d_stride,
-    NUM_GROUPS: tl.constexpr,
-    NUM_HEADS: tl.constexpr,
-    D: tl.constexpr,
-    BLOCK_Q: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    global_block_id = tl.program_id(0)
-    d_block_id = tl.program_id(1)
-
-    lo, hi = 0, NUM_GROUPS
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if tl.load(attn_block_offsets_ptr + mid) <= global_block_id:
-            lo = mid + 1
-        else:
-            hi = mid
-
-    group_id = lo - 1
-    group_block_id = global_block_id - tl.load(attn_block_offsets_ptr + group_id)
-
-    q_len = tl.load(q_lens_ptr + group_id)
-    k_len = tl.load(k_lens_ptr + group_id)
-    scores_start = tl.load(cu_seqlens_scores_ptr + group_id)
-
-    seq_id = group_id // NUM_HEADS
-    head_id = group_id % NUM_HEADS
-    q_start = tl.load(cu_seqlens_ptr + seq_id)
-    k_start = tl.load(cu_seqlens_k_ptr + group_id)
-
-    offs_q = group_block_id * BLOCK_Q + tl.arange(0, BLOCK_Q)
-    q_mask = offs_q < q_len
-
-    offs_d = d_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
-    d_mask = offs_d < D
-
-    acc = tl.zeros((BLOCK_Q, BLOCK_D), dtype=tl.float32)
-
-    output_width = k_len + 1
-    self_score_ptrs = (
-        scores_ptr
-        + scores_start
-        + offs_q * output_width
-    )
-    self_prob = tl.load(
-        self_score_ptrs,
-        mask=q_mask,
-        other=0.0,
-    )
-
-    original_v_ptrs = (
-        original_v_ptr
-        + (q_start + offs_q[:, None]) * original_v_t_stride
-        + head_id * original_v_h_stride
-        + offs_d[None, :] * original_v_d_stride
-    )
-    original_v = tl.load(
-        original_v_ptrs,
-        mask=(q_mask[:, None] & d_mask[None, :]), other=0.0
-    )
-    acc += self_prob[:, None] * original_v
+    acc = row_sum_exp[:, None] * orig_v
 
     for k_block_start in range(0, k_len, BLOCK_K):
         offs_k = k_block_start + tl.arange(0, BLOCK_K)
-        k_mask = offs_k < k_len
+        mask_k = offs_k < k_len
+        k_abs = k_start + offs_k
 
-        score_ptrs = (
-            scores_ptr
-            + scores_start
-            + offs_q[:, None] * output_width
-            + offs_k[None, :]
-            + 1
-        )
-        probs = tl.load(
-            score_ptrs,
-            mask=q_mask[:, None] & k_mask[None, :],
+        k = tl.load(
+            k_ptr
+            + k_abs[:, None] * k_k_stride
+            + offs_d[None, :] * k_d_stride,
+            mask=mask_k[:, None],
             other=0.0,
         )
 
-        v_ptrs = (
+        scores = tl.dot(q, tl.trans(k)) * SCALE
+
+        log_gate = tl.load(log_gate_ptr + k_abs, mask=mask_k, other=float("-inf"))
+        scores += log_gate[None, :]
+
+        k_ids = tl.load(k_ids_ptr + k_abs, mask=mask_k, other=-1)
+
+        if IS_CAUSAL:
+            allowed = k_ids[None, :] < q_ids[:, None]
+        else:
+            allowed = k_ids[None, :] != q_ids[:, None]
+
+        scores = tl.where(allowed, scores, -float("inf"))
+
+        block_max = tl.max(scores, axis=1)
+        new_max = tl.maximum(row_max, block_max)
+        alpha = tl.exp(row_max - new_max)
+
+        exp_scores = tl.exp(scores - new_max[:, None])
+        block_sum = tl.sum(exp_scores, axis=1)
+
+        acc *= alpha[:, None]
+
+        v = tl.load(
             v_ptr
-            + (k_start + offs_k[:, None]) * v_t_stride
-            + offs_d[None, :] * v_d_stride
-        )
-        v_tile = tl.load(
-            v_ptrs,
-            mask=k_mask[:, None] & d_mask[None, :],
+            + k_abs[:, None] * v_k_stride
+            + offs_d[None, :] * v_d_stride,
+            mask=mask_k[:, None],
             other=0.0,
         )
-        
-        acc += tl.dot(probs, v_tile)
 
-    out_ptrs = (
+        acc += tl.dot(exp_scores, v)
+        row_sum_exp = row_sum_exp * alpha + block_sum
+        row_max = new_max
+
+    acc /= row_sum_exp[:, None]
+
+    tl.store(
         out_ptr
-        + (q_start + offs_q[:, None]) * out_t_stride
+        + q_ids[:, None] * out_t_stride
         + head_id * out_h_stride
-        + offs_d[None, :] * out_d_stride
+        + offs_d[None, :] * out_d_stride,
+        acc,
+        mask=mask_q[:, None],
     )
-    tl.store(out_ptrs, acc, mask=(q_mask[:, None] & d_mask[None, :]))
+
 
 
 @triton.autotune(
@@ -615,70 +321,6 @@ def pack_sequences_kernel(
     )
 
     tl.store(packed_ptrs, x, mask=mask)
-
-
-
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_D": 32}, num_warps=2),
-        triton.Config({"BLOCK_D": 64}, num_warps=2),
-        triton.Config({"BLOCK_D": 64}, num_warps=4),
-        triton.Config({"BLOCK_D": 128}, num_warps=4),
-        triton.Config({"BLOCK_D": 128}, num_warps=8),
-        triton.Config({"BLOCK_D": 256}, num_warps=8),
-    ],
-    key=["D", "BLOCK_T"],
-)
-@triton.jit
-def unpack_sequences_kernel(
-    packed_ptr,             # (total_tokens, dim)
-    x_ptr,                  # (batch_size, max_seq_len, dim)
-    cu_seqlens_ptr,         # (batch_size + 1,)
-    unpack_offsets_ptr,     # (batch_size + 1,)
-    packed_t_stride, packed_d_stride,
-    x_b_stride, x_s_stride, x_d_stride,
-    B: tl.constexpr,
-    D: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    block_id = tl.program_id(0)
-    d_block_id = tl.program_id(1)
-
-    lo, hi = 0, B
-    while lo < hi:
-        mid = (lo + hi) // 2
-
-        if tl.load(unpack_offsets_ptr + mid) <= block_id:
-            lo = mid + 1
-        else:
-            hi = mid
-
-    b = lo - 1
-    t_block = block_id - tl.load(unpack_offsets_ptr + b)
-
-    seq_start = tl.load(cu_seqlens_ptr + b)
-    seq_len = tl.load(cu_seqlens_ptr + b + 1) - seq_start
-
-    offs_t = t_block * BLOCK_T + tl.arange(0, BLOCK_T)
-    offs_d = d_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
-
-    mask = (offs_t[:, None] < seq_len) & (offs_d[None, :] < D)
-
-    packed_ptrs = (
-        packed_ptr
-        + (seq_start + offs_t[:, None]) * packed_t_stride
-        + offs_d[None, :] * packed_d_stride
-    )
-    val = tl.load(packed_ptrs, mask=mask, other=0.0)
-
-    x_ptrs = (
-        x_ptr
-        + b * x_b_stride
-        + offs_t[:, None] * x_s_stride
-        + offs_d[None, :] * x_d_stride
-    )
-    tl.store(x_ptrs, val, mask=mask)
 
 
 

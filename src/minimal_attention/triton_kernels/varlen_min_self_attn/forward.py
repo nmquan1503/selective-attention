@@ -3,10 +3,8 @@ import triton
 
 from .forward_kernel import (
     count_kept_kernel, compact_kernel,
-    qk_matmul_kernel, fill_self_score_kernel,
-    softmax_kernel,
-    attn_output_kernel,
-    pack_sequences_kernel, unpack_sequences_kernel
+    min_self_attn_kernel,
+    pack_sequences_kernel, unpack_sequences_kernel,
 )
 
 def _compress(
@@ -70,16 +68,19 @@ def _compress(
 
     return k_out, v_out, log_gate_out, k_ids, cu_seqlens_k
 
-def _qk_matmul(
+
+
+def _min_self_attn(
     q: torch.Tensor,
     k: torch.Tensor,
+    v: torch.Tensor,
     log_gate: torch.Tensor,
     k_ids: torch.Tensor,
     self_score: torch.Tensor,
+    original_v: torch.Tensor,
     cu_seqlens: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
-    q_lens: torch.Tensor,
-    k_lens: torch.Tensor,
+    max_seqlen: int,
     avg_q_len: int,
     avg_k_len: int,
     scale: float,
@@ -89,230 +90,63 @@ def _qk_matmul(
     Args:
         q: (total_tokens, num_heads, dim)
         k: (total_keys, dim)
-        log_gate, k_ids: (total_keys,)
+        v: (total_keys, dim)
+        log_gate: (total_keys,)
+        k_ids: (total_keys,)
         self_score: (total_tokens, num_heads)
+        original_v: (total_tokens, num_heads, dim)
         cu_seqlens: (num_seqs + 1,)
         cu_seqlens_k: (num_groups + 1,)
-        q_lens, k_lens: (num_groups + 1,)
-    
+        max_seqlen: maximum query sequence length
+        avg_q_len: average query sequence length
+        avg_k_len: average key sequence length
+
     Returns:
-        scores: (total_scores,)
-        cu_seqlens_scores: (num_seqs * num_heads + 1,)
+        out: (total_tokens, num_heads, dim)
     """
-    total_q_tokens, num_heads, dim = q.shape
+
+    total_tokens, num_heads, dim = q.shape
     num_seqs = cu_seqlens.numel() - 1
-    num_groups = num_seqs * num_heads
 
-    scores_lens = q_lens * (k_lens + 1)
-    cu_seqlens_scores = torch.zeros(
-        num_groups + 1, 
-        device=q.device, dtype=torch.int32
+    out = torch.empty_like(q)
+
+    TARGET_WORK = 64 * 1024
+    MIN_BLOCK_Q = 16
+    MIN_BLOCK_K = 32
+
+    BLOCK_Q = min(128, triton.next_power_of_2(avg_q_len))
+    BLOCK_K = min(128, triton.next_power_of_2(avg_k_len))
+
+    budget = TARGET_WORK // dim
+
+    max_block_q = 1 << (max(1, budget // BLOCK_K).bit_length() - 1)
+    BLOCK_Q = max(MIN_BLOCK_Q, min(BLOCK_Q, max_block_q))
+
+    if BLOCK_Q == MIN_BLOCK_Q:
+        max_block_k = 1 << (max(1, budget // BLOCK_Q).bit_length() - 1)
+        BLOCK_K = max(MIN_BLOCK_K, min(BLOCK_K, max_block_k))
+
+    grid = (
+        num_seqs,
+        num_heads,
+        triton.cdiv(max_seqlen, BLOCK_Q),
     )
-    cu_seqlens_scores[1:] = torch.cumsum(scores_lens, dim=0)
-
-    total_scores = cu_seqlens_scores[-1].item()
-    scores = torch.empty(
-        total_scores, 
-        device=q.device, dtype=q.dtype
-    )
-
-    if avg_q_len <= 32:
-        block_q_matmul = 16
-    elif avg_q_len <= 128:
-        block_q_matmul = 32
-    else:
-        block_q_matmul = 64
-
-    if avg_k_len <= 32:
-        block_k_matmul = 16
-    elif avg_k_len <= 128:
-        block_k_matmul = 32
-    else:
-        block_k_matmul = 64
-
-    num_q_blocks = triton.cdiv(q_lens, block_q_matmul)
-    num_k_blocks = triton.cdiv(k_lens, block_k_matmul)
-    blocks_per_group = num_q_blocks * num_k_blocks
-
-    qk_offsets = torch.zeros(
-        num_groups + 1, 
-        device=q.device, 
-        dtype=torch.int32
-    )
-    qk_offsets[1:] = torch.cumsum(blocks_per_group, dim=0)
-    total_qk_blocks = qk_offsets[-1].item()
-
-    qk_matmul_kernel[(total_qk_blocks,)](
-        q, k, log_gate, k_ids, scores,
-        cu_seqlens, cu_seqlens_k, cu_seqlens_scores,
-        qk_offsets, q_lens, k_lens,
+    min_self_attn_kernel[grid](
+        q, k, v, log_gate, k_ids, self_score, original_v,
+        out,
+        cu_seqlens, cu_seqlens_k,
         *q.stride(),
         *k.stride(),
-        NUM_GROUPS=num_groups,
+        *v.stride(),
+        *original_v.stride(),
+        *out.stride(),
+        *self_score.stride(),
         NUM_HEADS=num_heads,
         IS_CAUSAL=is_causal,
         SCALE=scale,
         D=dim,
-        BLOCK_Q=block_q_matmul,
-        BLOCK_K=block_k_matmul,
-    )
-
-    block_q_fill = min(256, max(triton.next_power_of_2(avg_q_len), 32))
-    num_q_blocks_fill = triton.cdiv(q_lens, block_q_fill)
-
-    fill_offsets = torch.zeros(
-        num_groups + 1, 
-        device=q.device, dtype=torch.int32
-    )
-    fill_offsets[1:] = torch.cumsum(num_q_blocks_fill, dim=0)
-    total_fill_blocks = fill_offsets[-1].item()
-
-    fill_self_score_kernel[(total_fill_blocks,)](
-        self_score, scores,
-        cu_seqlens, cu_seqlens_scores,
-        fill_offsets, q_lens, k_lens,
-        *(self_score.stride()),
-        NUM_GROUPS=num_groups,
-        NUM_HEADS=num_heads,
-        BLOCK_Q=block_q_fill,
-        num_warps=max(1, block_q_fill // 32)
-    )
-
-    return scores, cu_seqlens_scores
-
-def _softmax(
-    scores: torch.Tensor,
-    cu_seqlens_scores: torch.Tensor,
-    q_lens: torch.Tensor,
-    k_lens: torch.Tensor,
-    avg_q_len: int,
-    avg_k_len: int,
-    num_groups: int
-):
-    """
-    Args:
-        scores: (total_scores,)
-        cu_seqlens_scores: (num_groups + 1,)
-        q_lens, k_lens: (num_groups,)
-    
-    Returns:
-        scores: (total_scores,)
-    """
-    if avg_q_len <= 64:
-        block_q = 32
-    elif avg_q_len <= 256:
-        block_q = 64
-    elif avg_q_len <= 1024:
-        block_q = 128
-    else:
-        block_q = 256
-
-    if avg_k_len <= 32:
-        block_k = 32
-    elif avg_k_len <= 128:
-        block_k = 64
-    elif avg_k_len <= 512:
-        block_k = 128
-    else:
-        block_k = 256
-
-    max_tile_elements = 8192
-    block_q = max(1, min(block_q, max_tile_elements // block_k))
-
-    num_q_blocks = triton.cdiv(q_lens, block_q)
-    softmax_offsets = torch.zeros(
-        num_groups + 1,
-        device=scores.device,
-        dtype=torch.int32,
-    )
-    softmax_offsets[1:] = torch.cumsum(num_q_blocks, dim=0)
-    total_softmax_blocks = softmax_offsets[-1].item()
-
-    if block_q <= 32:
-        num_warps = 2
-    elif block_q <= 64:
-        num_warps = 4
-    else:
-        num_warps = 8
-
-    softmax_kernel[(total_softmax_blocks,)](
-        scores, cu_seqlens_scores,
-        softmax_offsets, q_lens, k_lens,
-        NUM_GROUPS=num_groups,
-        BLOCK_Q=block_q,
-        BLOCK_K=block_k,
-        num_warps=num_warps
-    )
-
-    return scores
-
-def _attn_output(
-    scores: torch.Tensor,
-    original_v: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    cu_seqlens_k: torch.Tensor,
-    cu_seqlens_scores: torch.Tensor,
-    q_lens: torch.Tensor,
-    k_lens: torch.Tensor,
-    num_groups: int,
-    avg_q_len: int,
-    avg_k_len: int,
-):
-    """
-    Args:
-        scores: (total_scores,)
-        original_v: (total_tokens, num_heads, dim)
-        v: (total_keys, dim)
-        cu_seqlens: (num_seqs + 1,)
-        cu_seqlens_k: (num_groups + 1,)
-        cu_seqlens_scores: (num_groups + 1,)
-        q_lens, k_lens: (num_groups,)
-    
-    Returns:
-        out: (total_tokens, num_heads, dim)
-    """
-    total_tokens, num_heads, dim = original_v.shape
-
-    if avg_q_len <= 64:
-        block_q = 32
-    else:
-        block_q = 64
-
-    if avg_k_len <= 32:
-        block_k = 32
-    elif avg_k_len <= 128:
-        block_k = 64
-    else:
-        block_k = 128
-
-    num_q_blocks_per_group = (q_lens + block_q - 1) // block_q  # (num_groups,)
-    attn_offsets = torch.zeros(
-        num_groups + 1,
-        dtype=torch.int32,
-        device=scores.device,
-    )
-    attn_offsets[1:] = torch.cumsum(num_q_blocks_per_group, dim=0)
-    total_q_blocks = attn_offsets[-1].item()
-
-    out = torch.empty_like(original_v)
-
-    grid = lambda META: (
-        total_q_blocks, 
-        triton.cdiv(dim, META["BLOCK_D"])
-    )
-    attn_output_kernel[grid](
-        scores, original_v, v, out,
-        cu_seqlens, cu_seqlens_k, cu_seqlens_scores,
-        attn_offsets, q_lens, k_lens,
-        *(original_v.stride()),
-        *(v.stride()),
-        *(out.stride()),
-        NUM_GROUPS=num_groups,  
-        NUM_HEADS=num_heads,
-        D=dim,
-        BLOCK_Q=block_q,
-        BLOCK_K=block_k,
+        BLOCK_Q=BLOCK_Q,
+        BLOCK_K=BLOCK_K,
     )
 
     return out
@@ -322,6 +156,7 @@ def varlen_min_self_attn_forward(
     k: torch.Tensor,
     v: torch.Tensor,
     cu_seqlens: torch.Tensor,
+    max_seqlen: int,
     gate: torch.Tensor,
     scores_std: torch.Tensor,
     log_gate_penalty: float,
@@ -346,7 +181,7 @@ def varlen_min_self_attn_forward(
         cu_seqlens_k: (num_groups + 1,)
     """
 
-    total_tokens, num_heads, dim = q.shape
+    total_tokens, num_heads, _ = q.shape
     num_seqs = cu_seqlens.numel() - 1
     num_groups = num_seqs * num_heads
 
@@ -357,39 +192,29 @@ def varlen_min_self_attn_forward(
     else:
         valid_key = torch.ones_like(gate, dtype=torch.bool)
 
-    self_score = (q.unsqueeze(-2) @ k.unsqueeze(-1)).squeeze(-1).squeeze(-1) * scale
+    self_score = (
+        (q.unsqueeze(-2) @ k.unsqueeze(-1))
+        .squeeze(-1)
+        .squeeze(-1)
+    )
 
     original_v = v
     log_gate = torch.log(gate) * scores_std[None, :] * log_gate_penalty
 
-    k, v, log_gate, k_ids, cu_seqlens_k = _compress(k, v, log_gate, valid_key, cu_seqlens)
+    k, v, log_gate, k_ids, cu_seqlens_k = _compress(
+        k, v, log_gate, valid_key,
+        cu_seqlens,
+    )
 
-    q_lens = (
-        cu_seqlens[1:] - cu_seqlens[:-1]
-    ).unsqueeze(1).expand(-1, num_heads).reshape(-1)
-    k_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-
+    total_keys = k.size(0)
     avg_q_len = total_tokens // num_seqs
-    avg_k_len = int(k_lens[k_lens > 0].float().mean().item())
+    avg_k_len = max(1, total_keys // num_groups)
 
-    scores, cu_seqlens_scores = _qk_matmul(
-        q, k, log_gate, k_ids, self_score, 
+    out = _min_self_attn(
+        q, k, v, log_gate, k_ids, self_score, original_v,
         cu_seqlens, cu_seqlens_k,
-        q_lens, k_lens, avg_q_len, avg_k_len,
-        scale, is_causal
-    )
-
-    _softmax(
-        scores, cu_seqlens_scores, 
-        q_lens, k_lens, avg_q_len, avg_k_len,
-        num_groups
-    )
-
-    out = _attn_output(
-        scores, original_v, v, 
-        cu_seqlens, cu_seqlens_k, cu_seqlens_scores,
-        q_lens, k_lens, num_groups,
-        avg_q_len, avg_k_len
+        max_seqlen, avg_q_len, avg_k_len,
+        scale, is_causal,
     )
 
     return out, k, v, log_gate, cu_seqlens_k

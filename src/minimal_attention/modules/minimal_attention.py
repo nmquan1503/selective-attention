@@ -225,7 +225,8 @@ class MinMHA(nn.Module):
     
             hidden_states, k_cache, v_cache, log_gate_cache, cu_seqlens_k = (
                 varlen_min_self_attn_forward(
-                    q, k, v, cu_seqlens, 
+                    q, k, v, 
+                    cu_seqlens, seq_len,
                     retrieval_gate, 
                     self.score_std_ema,
                     self.log_gate_penalty, 
