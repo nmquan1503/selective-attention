@@ -201,7 +201,7 @@ def varlen_min_self_attn_decode(
     BLOCK_K = max(MIN_BLOCK_K, BLOCK_K)
 
     mid_o = torch.zeros(num_groups, num_chunks, dim, dtype=q.dtype, device=q.device)
-    mid_logsumexp = torch.zeros(num_groups, num_chunks, dtype=q.dtype, device=q.device)
+    mid_logsumexp = torch.full((num_groups, num_chunks), float("-inf"), dtype=q.dtype, device=q.device)
 
     min_attn_decode_kernel[(num_seqs, num_heads, num_chunks)](
         q, k, v, gate, scores_std,
