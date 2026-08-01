@@ -1,5 +1,6 @@
 import torch
 import triton
+import math
 
 from .forward_kernel import (
     count_kept_kernel, compact_kernel,
@@ -107,24 +108,56 @@ def _min_self_attn(
 
     total_tokens, num_heads, dim = q.shape
     num_seqs = cu_seqlens.numel() - 1
+    num_groups = num_seqs * num_heads
 
     out = torch.empty_like(q)
 
-    TARGET_WORK = 64 * 1024
-    MIN_BLOCK_Q = 16
-    MIN_BLOCK_K = 32
+    # Peak = BLOCK_Q * D + BLOCK_K * D + BLOCK_Q * BLOCK_K
+    SMEM_BUDGET = 32 * 1024
+    MIN_BLOCK_Q = 8
+    MIN_BLOCK_K = 16
+    MAX_BLOCK_Q = min(128, triton.next_power_of_2(avg_q_len))
+    MAX_BLOCK_K = min(128, triton.next_power_of_2(avg_k_len))
 
-    BLOCK_Q = min(128, triton.next_power_of_2(avg_q_len))
-    BLOCK_K = min(128, triton.next_power_of_2(avg_k_len))
+    dtype_size = q.element_size()
+    smem_elems = SMEM_BUDGET // dtype_size
 
-    budget = TARGET_WORK // dim
+    BLOCK_Q = MIN_BLOCK_Q
+    BLOCK_K = MIN_BLOCK_K
 
-    max_block_q = 1 << (max(1, budget // BLOCK_K).bit_length() - 1)
-    BLOCK_Q = max(MIN_BLOCK_Q, min(BLOCK_Q, max_block_q))
+    while (
+        (BLOCK_Q << 1) <= MAX_BLOCK_Q
+        and ((BLOCK_Q << 1) * dim + BLOCK_K * dim + (BLOCK_Q << 1) * BLOCK_K <= smem_elems)
+    ):
+        BLOCK_Q <<= 1
 
-    if BLOCK_Q == MIN_BLOCK_Q:
-        max_block_k = 1 << (max(1, budget // BLOCK_Q).bit_length() - 1)
-        BLOCK_K = max(MIN_BLOCK_K, min(BLOCK_K, max_block_k))
+    while (
+        (BLOCK_K << 1) <= MAX_BLOCK_K
+        and (BLOCK_Q * dim + (BLOCK_K << 1) * dim + BLOCK_Q * (BLOCK_K << 1) <= smem_elems)
+    ):
+        BLOCK_K <<= 1
+
+    num_sms = torch.cuda.get_device_properties(
+        torch.cuda.current_device()
+    ).multi_processor_count
+
+    num_programs = num_groups * math.ceil(max_seqlen / BLOCK_Q)
+
+    while num_programs < num_sms and BLOCK_Q > MIN_BLOCK_Q:
+        BLOCK_Q >>= 1
+
+        while (
+            (BLOCK_K << 1) <= MAX_BLOCK_K
+            and (
+                BLOCK_Q * dim
+                + (BLOCK_K << 1) * dim
+                + BLOCK_Q * (BLOCK_K << 1)
+                <= smem_elems
+            )
+        ):
+            BLOCK_K <<= 1
+
+        num_programs = num_groups * math.ceil(max_seqlen / BLOCK_Q)
 
     grid = (
         num_seqs,
