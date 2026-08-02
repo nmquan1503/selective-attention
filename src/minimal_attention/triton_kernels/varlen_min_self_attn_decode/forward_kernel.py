@@ -213,11 +213,6 @@ def min_attn_decode_kernel(
                     v,
                 )
 
-                tl.store(
-                    write_pos_ptr + group_id,
-                    write_pos + 1,
-                )
-
         else:
             scores_std = tl.load(scores_std_ptr + head_id)
 
@@ -238,11 +233,6 @@ def min_attn_decode_kernel(
                 + chunk_end * k_cache_k_stride
                 + offs_d * k_cache_d_stride,
                 v,
-            )
-
-            tl.store(
-                write_pos_ptr + group_id,
-                write_pos + 1,
             )
 
     offs_cache_base = tl.arange(0, BLOCK_K)
@@ -336,7 +326,7 @@ def reduce_kernel(
     k_start = tl.load(cu_seqlens_k_ptr + group_id)
     write_pos = tl.load(write_pos_ptr + group_id)
 
-    cache_len = write_pos - k_start
+    cache_len = write_pos - k_start + 1
 
     gate = tl.load(
         gate_ptr
@@ -346,8 +336,17 @@ def reduce_kernel(
 
     if HAS_GATE_THRESHOLD:
         threshold = tl.load(gate_threshold_ptr + head_id)
-        if not (gate > threshold and gate > 0):
-            cache_len += 1
+        if gate > threshold and gate > 0:
+            tl.store(
+                write_pos_ptr + group_id,
+                write_pos + 1,
+            )
+            
+    else:
+        tl.store(
+            write_pos_ptr + group_id,
+            write_pos + 1,
+        )
 
     num_chunks = tl.cdiv(cache_len, CHUNK_SIZE)
 
