@@ -179,7 +179,7 @@ def min_attn_decode_kernel(
         )
 
         m = tl.reshape(tl.dot(q, k), ()).to(tl.float32) * SCALE
-        l = tl.exp(m)
+        l = 1.0
         acc = v
 
         gate = tl.load(
