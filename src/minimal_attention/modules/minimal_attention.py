@@ -159,7 +159,7 @@ class MinMHA(nn.Module):
         head_dim: int,
         log_gate_penalty: float,
         is_causal: bool,
-        fast: bool = True,
+        fast: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
