@@ -463,8 +463,8 @@ class MinMHA(nn.Module):
 
         if state.step % gen_cfg.cache_update_interval == 0:
             if cache.k_rot is None:
-                cache.k_rot = torch.empty((batch_size, self.num_heads, gen_cfg.cache_update_interval, self.head_dim), device=device, dtype=torch.float32)
-                cache.v = torch.empty((batch_size, self.num_heads, gen_cfg.cache_update_interval, self.head_dim), device=device, dtype=torch.float32)
+                cache.k_rot = torch.zeros((batch_size, self.num_heads, gen_cfg.cache_update_interval, self.head_dim), device=device, dtype=torch.float32)
+                cache.v = torch.zeros((batch_size, self.num_heads, gen_cfg.cache_update_interval, self.head_dim), device=device, dtype=torch.float32)
                 cache.log_gate = torch.zeros((batch_size, self.num_heads, gen_cfg.cache_update_interval), device=device, dtype=torch.float32)
             else:
                 _reset_cache(cache, gen_cfg.cache_update_interval)
