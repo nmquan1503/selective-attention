@@ -281,8 +281,9 @@ class CausalLM(nn.Module):
                     freq += gate_analysis["gate_freq"]
 
             mass_mean = mass / count.clamp(min=1)
-            min_freq = (1.0 / num_bins) * 0.1
-            freq = freq / freq.sum(dim=-1, keepdim=True).clamp(min=1)
+            min_freq = 30
+            # min_freq = (1.0 / num_bins) * 0.1
+            # freq = freq / freq.sum(dim=-1, keepdim=True).clamp(min=1)
             above_threshold = (mass_mean >= mass_threshold) & (freq >= min_freq)
             has_exceeding_bin = above_threshold.any(dim=-1)
             first_bin = above_threshold.float().argmax(dim=-1)
