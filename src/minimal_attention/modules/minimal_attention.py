@@ -381,11 +381,21 @@ class MinMHA(nn.Module):
             bin_attn_mass = bin_attn_mass_flat.view(self.num_heads, num_bins)
             bin_attn_count = bin_attn_count_flat.view(self.num_heads, num_bins)
             bin_gate_freq = bin_gate_freq_flat.view(self.num_heads, num_bins)
-                
+
+            if lengths is not None:
+                total_valid_pos = int(lengths.sum().item())
+            else:
+                total_valid_pos = batch_size * seq_len
+
+            total_head_tokens = total_valid_pos * self.num_heads
+            kept_head_tokens = int(valid_mask.sum().item())
+
             stats[f"{'causal' if self.is_causal else 'non_causal'}_attn_gate_analysis"] = {
                 "attn_mass": bin_attn_mass,
                 "attn_count": bin_attn_count,
-                "gate_freq": bin_gate_freq
+                "gate_freq": bin_gate_freq,
+                "total_head_tokens": total_head_tokens,
+                "kept_head_tokens": kept_head_tokens
             }
 
         return hidden_states
