@@ -97,6 +97,40 @@ class Encoder(nn.Module):
         
         return hidden_states
 
+    def warmup(self, batch_size: int = 2):
+        device = self.cfg.device
+        seq_len = max(2, self.cfg.ssm_chunk_size)
+        input_ids = torch.randint(
+            0, self.cfg.vocab_size,
+            (batch_size, seq_len),
+            device=device,
+            dtype=torch.long
+        )
+        lengths = torch.full(
+            (batch_size,),
+            fill_value=seq_len,
+            device=device,
+            dtype=torch.long
+        )
+
+        if self.training:
+            hidden_states = self.forward(input_ids=input_ids, lengths=lengths)
+            loss = hidden_states.float().mean()
+            loss.backward()
+            self.zero_grad(set_to_none=True)
+
+        self.eval()
+        self.forward(
+            input_ids=input_ids,
+            lengths=lengths,
+            attn_gate_thresholds=torch.full(
+                (self.cfg.num_layers, self.cfg.model_dim // self.cfg.head_dim),
+                0.5, device=device
+            ),
+        )
+
+        torch.cuda.synchronize(device)
+
     def compute_attn_gate_threshold(
         self,
         inputs: List[torch.Tensor],
