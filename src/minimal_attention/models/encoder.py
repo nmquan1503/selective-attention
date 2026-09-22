@@ -120,14 +120,15 @@ class Encoder(nn.Module):
             self.zero_grad(set_to_none=True)
 
         self.eval()
-        self.forward(
-            input_ids=input_ids,
-            lengths=lengths,
-            attn_gate_thresholds=torch.full(
-                (self.cfg.num_layers, self.cfg.model_dim // self.cfg.head_dim),
-                0.5, device=device
-            ),
-        )
+        with torch.no_grad():
+            self.forward(
+                input_ids=input_ids,
+                lengths=lengths,
+                attn_gate_thresholds=torch.full(
+                    (self.cfg.num_layers, self.cfg.model_dim // self.cfg.head_dim),
+                    0.5, device=device
+                ),
+            )
 
         torch.cuda.synchronize(device)
 
