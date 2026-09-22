@@ -1,7 +1,9 @@
 from .causal_lm import CausalLM, CausalLMConfig
 from .seq2seq_lm import Seq2SeqLM, Seq2SeqLMConfig
+from .encoder import Encoder, EncoderConfig
 
 __all__ = [
     "CausalLM", "CausalLMConfig",
-    "Seq2SeqLM", "Seq2SeqLMConfig"
+    "Seq2SeqLM", "Seq2SeqLMConfig",
+    "Encoder", "EncoderConfig"
 ]
