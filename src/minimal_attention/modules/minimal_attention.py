@@ -307,11 +307,10 @@ class MinMHA(nn.Module):
                     alpha=0.1,
                 )
         
-        log_retrieval_gate = torch.log(retrieval_gate)
         if is_infer:
-            log_retrieval_gate *= self.score_std_ema[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate = torch.log(retrieval_gate) * self.score_std_ema[None, :, None] * self.log_gate_penalty
         else:
-            log_retrieval_gate *= head_attention_score_std[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate = torch.log(retrieval_gate.clamp_min(1e-30)) * head_attention_score_std[None, :, None] * self.log_gate_penalty
         
         if lengths is not None:
             if is_infer:

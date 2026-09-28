@@ -149,7 +149,7 @@ class CrossMinMHA(nn.Module):
                     head_attention_score_std,
                     alpha=0.1,
                 )
-            log_retrieval_gate = torch.log(retrieval_gate) * head_attention_score_std[None, :, None] * self.log_gate_penalty
+            log_retrieval_gate = torch.log(retrieval_gate.clamp_min(1e-30)) * head_attention_score_std[None, :, None] * self.log_gate_penalty
 
         if is_infer:
             attn_matrix[:, :, :, 1:] += log_retrieval_gate[:, :, 1:].unsqueeze(2)
