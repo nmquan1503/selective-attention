@@ -335,67 +335,78 @@ class MinMHA(nn.Module):
         if is_prefill:
             cache.build_kv(k_rot, v_aligned, log_retrieval_gate)
         
-        if analysis_cfg is not None and stats is not None  and attn_gate_threshold is None:
-            mean_out_gate = out_gate.view(batch_size, seq_len, self.num_heads, self.head_dim).mean(dim=-1).transpose(1, 2)
-            query_valid = (mean_out_gate >= 0.1).float()
-            if self.is_causal:
-                scale = torch.arange(1, seq_len + 1, device=device).view(1, 1, seq_len, 1)
-            elif lengths is not None:
-                scale = lengths.view(-1, 1, 1, 1)
-            else:
-                scale = torch.tensor(seq_len, device=device, dtype=attn_weight.dtype)
-            scaled_weight = attn_weight * scale * query_valid.unsqueeze(-1)
-            pos = torch.arange(seq_len, device=device)
-            if lengths is not None:
-                query_valid = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(-1) 
-                key_valid   = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(1)
-                padding_mask = query_valid & key_valid 
-                scaled_weight = scaled_weight * padding_mask.unsqueeze(1)
+        if analysis_cfg is not None and stats is not None:
+            if attn_gate_threshold is None:
+                mean_out_gate = out_gate.view(batch_size, seq_len, self.num_heads, self.head_dim).mean(dim=-1).transpose(1, 2)
+                query_valid = (mean_out_gate >= 0.1).float()
+                if self.is_causal:
+                    scale = torch.arange(1, seq_len + 1, device=device).view(1, 1, seq_len, 1)
+                elif lengths is not None:
+                    scale = lengths.view(-1, 1, 1, 1)
+                else:
+                    scale = torch.tensor(seq_len, device=device, dtype=attn_weight.dtype)
+                scaled_weight = attn_weight * scale * query_valid.unsqueeze(-1)
+                pos = torch.arange(seq_len, device=device)
+                if lengths is not None:
+                    query_valid = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(-1) 
+                    key_valid   = (pos.unsqueeze(0) < lengths.unsqueeze(1)).unsqueeze(1)
+                    padding_mask = query_valid & key_valid 
+                    scaled_weight = scaled_weight * padding_mask.unsqueeze(1)
 
-            if self.is_causal:
-                causal_valid = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
-                scaled_weight = scaled_weight * causal_valid.unsqueeze(0).unsqueeze(1)
+                if self.is_causal:
+                    causal_valid = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
+                    scaled_weight = scaled_weight * causal_valid.unsqueeze(0).unsqueeze(1)
 
-            self_mask = ~torch.eye(seq_len, dtype=torch.bool, device=device)
-            scaled_weight = scaled_weight * self_mask.unsqueeze(0).unsqueeze(0)
+                self_mask = ~torch.eye(seq_len, dtype=torch.bool, device=device)
+                scaled_weight = scaled_weight * self_mask.unsqueeze(0).unsqueeze(0)
 
-            sum_per_key = scaled_weight.sum(dim=2)
-            count_per_key = (scaled_weight > 0).sum(dim=2)
+                sum_per_key = scaled_weight.sum(dim=2)
+                count_per_key = (scaled_weight > 0).sum(dim=2)
 
-            num_bins = analysis_cfg.gate_attn_num_bins
-            gate_vals = retrieval_gate
-            bin_idx = (gate_vals * num_bins).long().clamp(0, num_bins - 1)
-            head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, seq_len).reshape(-1)
-            flat_index = head_idx * num_bins + bin_idx.reshape(-1)
-            
-            bin_attn_mass_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
-            bin_attn_count_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
-            bin_gate_freq_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+                num_bins = analysis_cfg.gate_attn_num_bins
+                gate_vals = retrieval_gate
+                bin_idx = (gate_vals * num_bins).long().clamp(0, num_bins - 1)
+                head_idx = torch.arange(self.num_heads, device=device).view(1, self.num_heads, 1).expand(batch_size, -1, seq_len).reshape(-1)
+                flat_index = head_idx * num_bins + bin_idx.reshape(-1)
+                
+                bin_attn_mass_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+                bin_attn_count_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
+                bin_gate_freq_flat = torch.zeros(self.num_heads * num_bins, dtype=torch.float32, device=device)
 
-            bin_attn_mass_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
-            bin_attn_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
-            gate_one = torch.ones_like(flat_index, dtype=torch.float32)
-            bin_gate_freq_flat.scatter_add_(0, flat_index, gate_one)
-            
-            bin_attn_mass = bin_attn_mass_flat.view(self.num_heads, num_bins)
-            bin_attn_count = bin_attn_count_flat.view(self.num_heads, num_bins)
-            bin_gate_freq = bin_gate_freq_flat.view(self.num_heads, num_bins)
+                bin_attn_mass_flat.scatter_add_(0, flat_index, sum_per_key.reshape(-1))
+                bin_attn_count_flat.scatter_add_(0, flat_index, count_per_key.reshape(-1).float())
+                gate_one = torch.ones_like(flat_index, dtype=torch.float32)
+                bin_gate_freq_flat.scatter_add_(0, flat_index, gate_one)
+                
+                bin_attn_mass = bin_attn_mass_flat.view(self.num_heads, num_bins)
+                bin_attn_count = bin_attn_count_flat.view(self.num_heads, num_bins)
+                bin_gate_freq = bin_gate_freq_flat.view(self.num_heads, num_bins)
 
-            if lengths is not None:
-                total_valid_pos = int(lengths.sum().item())
-            else:
-                total_valid_pos = batch_size * seq_len
+                if lengths is not None:
+                    total_valid_pos = int(lengths.sum().item())
+                else:
+                    total_valid_pos = batch_size * seq_len
 
-            total_head_tokens = total_valid_pos * self.num_heads
-            kept_head_tokens = int(valid_mask.sum().item())
+                total_head_tokens = total_valid_pos * self.num_heads
+                kept_head_tokens = int(valid_mask.sum().item())
 
-            stats[f"{'causal' if self.is_causal else 'non_causal'}_attn_gate_analysis"] = {
-                "attn_mass": bin_attn_mass,
-                "attn_count": bin_attn_count,
-                "gate_freq": bin_gate_freq,
-                "total_head_tokens": total_head_tokens,
-                "kept_head_tokens": kept_head_tokens
-            }
+                stats[f"{'causal' if self.is_causal else 'non_causal'}_attn_gate_analysis"] = {
+                    "attn_mass": bin_attn_mass,
+                    "attn_count": bin_attn_count,
+                    "gate_freq": bin_gate_freq,
+                }
+            elif not self.is_causal:
+                if lengths is not None:
+                    total_valid_pos = int(lengths.sum().item())
+                else:
+                    total_valid_pos = batch_size * seq_len
+
+                total_head_tokens = total_valid_pos * self.num_heads
+                kept_head_tokens = int(valid_mask.sum().item())
+                stats["non_causal_attn_gate_analysis"] = {
+                    "total_head_tokens": total_head_tokens,
+                    "kept_head_tokens": kept_head_tokens
+                }
 
         return hidden_states
 

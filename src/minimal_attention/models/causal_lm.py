@@ -228,7 +228,7 @@ class CausalLM(nn.Module):
 
         if analysis_cfg is not None:
             num_heads = self.cfg.model_dim // self.cfg.head_dim
-            max_seq_len = seq_len + min(state.step + 1, gen_cfg.max_new_tokens)
+            max_seq_len = seq_len + min(state.step, gen_cfg.max_new_tokens)
             max_cache_slots = max_seq_len * num_heads * self.cfg.num_layers
 
             total_kept_slots = 0

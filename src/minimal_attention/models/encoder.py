@@ -88,10 +88,14 @@ class Encoder(nn.Module):
             for layer_stats in stats["layers"]:
                 key = "non_causal_attn_gate_analysis"
                 if key in layer_stats:
-                    total_head_tokens += layer_stats[key]["total_head_tokens"]
-                    kept_head_tokens += layer_stats[key]["kept_head_tokens"]
+                    total_head_tokens += layer_stats[key].get("total_head_tokens", 0)
+                    kept_head_tokens += layer_stats[key].get("kept_head_tokens", 0)
 
-            stats["overall"]["kept_ratio"] = kept_head_tokens / max(total_head_tokens, 1)
+            stats["overall"]["kept_ratio"] = (
+                kept_head_tokens / total_head_tokens
+                if total_head_tokens > 0
+                else 1.0
+            )
 
             return hidden_states, stats
         
