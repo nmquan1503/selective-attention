@@ -259,39 +259,35 @@ class CausalLM(nn.Module):
         num_bins = analysis_cfg.gate_attn_num_bins
         num_heads = self.cfg.model_dim // self.cfg.head_dim
         num_layers = self.cfg.num_layers
-        gate_thresholds = [
-            None
-            for _ in range(num_layers)
-        ]
-        for layer_idx in range(num_layers):
-            mass = torch.zeros(num_heads, num_bins, device=self.cfg.device)
-            count = torch.zeros(num_heads, num_bins, device=self.cfg.device)
-            freq = torch.zeros(num_heads, num_bins, device=self.cfg.device)
 
-            current_gen_cfg = deepcopy(gen_cfg)
-            current_gen_cfg.attn_gate_thresholds = gate_thresholds
+        mass = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        count = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        freq = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
 
-            with torch.inference_mode():
-                for ip in inputs:
-                    ip = ip.to(self.cfg.device)
-                    _, stats_dict = self.generate(ip, current_gen_cfg, analysis_cfg)
+        current_gen_cfg = deepcopy(gen_cfg)
+        current_gen_cfg.attn_gate_thresholds = None
+
+        with torch.inference_mode():
+            for ip in inputs:
+                ip = ip.to(self.cfg.device)
+                _, stats_dict = self.generate(ip, current_gen_cfg, analysis_cfg)
+                for layer_idx in range(num_layers):
                     gate_analysis = stats_dict["layers"][layer_idx]["causal_attn_gate_analysis"]
-                    mass += gate_analysis["attn_mass"]
-                    count += gate_analysis["attn_count"]
-                    freq += gate_analysis["gate_freq"]
+                    mass[layer_idx] += gate_analysis["attn_mass"]
+                    count[layer_idx] += gate_analysis["attn_count"]
+                    freq[layer_idx] += gate_analysis["gate_freq"]
 
-            mass_mean = mass / count.clamp(min=1)
-            min_freq = 30
-            # min_freq = (1.0 / num_bins) * 0.1
-            # freq = freq / freq.sum(dim=-1, keepdim=True).clamp(min=1)
-            above_threshold = (mass_mean >= mass_threshold) & (freq >= min_freq)
-            has_exceeding_bin = above_threshold.any(dim=-1)
-            first_bin = above_threshold.float().argmax(dim=-1)
-            calibrated_threshold = first_bin.float() / num_bins
-            calibrated_threshold = calibrated_threshold.masked_fill(
-                ~has_exceeding_bin,
-                1.1,
-            )
-            gate_thresholds[layer_idx] = calibrated_threshold
+        mass_mean = mass / count.clamp(min=1)
+        min_freq = 30
+        # min_freq = (1.0 / num_bins) * 0.1
+        # freq = freq / freq.sum(dim=-1, keepdim=True).clamp(min=1)
+        above_threshold = (mass_mean >= mass_threshold) & (freq >= min_freq)
+        has_exceeding_bin = above_threshold.any(dim=-1)
+        first_bin = above_threshold.float().argmax(dim=-1)
+        calibrated_threshold = first_bin.float() / num_bins
+        calibrated_threshold = calibrated_threshold.masked_fill(
+            ~has_exceeding_bin,
+            1.1,
+        )
         
-        return torch.stack(gate_thresholds)
+        return calibrated_threshold

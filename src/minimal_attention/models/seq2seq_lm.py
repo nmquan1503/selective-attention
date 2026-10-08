@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 from typing import List, Dict
+from copy import deepcopy
 
 from ..modules import BiBlock, CrossBlock, SSM, RMSNorm
 from ..inference import CrossBlockCache, InferenceState, GenerationConfig, AnalysisConfig
@@ -320,50 +321,63 @@ class Seq2SeqLM(nn.Module):
         """ 
         num_bins = analysis_cfg.gate_attn_num_bins
         num_heads = self.cfg.model_dim // self.cfg.head_dim
+        num_layers = self.cfg.num_layers
+        min_freq = 30
         
-        enc_mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
-        enc_count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        enc_mass = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        enc_count = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        enc_freq   = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
         
-        cross_mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
-        cross_count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        cross_mass = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        cross_count = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        cross_freq  = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
         
-        dec_mass = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
-        dec_count = torch.zeros(self.cfg.num_layers, num_heads, num_bins, device=self.cfg.device)
+        dec_mass = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        dec_count = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+        dec_freq   = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
+
+        current_gen_cfg = deepcopy(gen_cfg)
+        current_gen_cfg.enc_attn_gate_thresholds = None
+        current_gen_cfg.attn_gate_thresholds = None
+        current_gen_cfg.cross_attn_gate_thresholds = None
         
         with torch.inference_mode():
             for ip in inputs:
                 ip = ip.to(self.cfg.device)
-                _, stats_dict = self.generate(ip, gen_cfg, analysis_cfg)
+                _, stats_dict = self.generate(ip, current_gen_cfg, analysis_cfg)
                 layers_stats = stats_dict["layers"]
-                for layer_idx in range(self.cfg.num_layers):
+                for layer_idx in range(num_layers):
                     enc_analysis = layers_stats[layer_idx]["non_causal_attn_gate_analysis"]
                     enc_mass[layer_idx] += enc_analysis["attn_mass"]
                     enc_count[layer_idx] += enc_analysis["attn_count"]
+                    enc_freq[layer_idx]  += enc_analysis["gate_freq"]
 
                     cross_analysis = layers_stats[layer_idx]["cross_attn_gate_analysis"]
                     cross_mass[layer_idx] += cross_analysis["attn_mass"]
                     cross_count[layer_idx] += cross_analysis["attn_count"]
+                    cross_freq[layer_idx]  += cross_analysis["gate_freq"]
                 
                     dec_analysis = layers_stats[layer_idx]["causal_attn_gate_analysis"]
-                    dec_mass[layer_idx] += dec_analysis[layer_idx]["attn_mass"]
-                    dec_count[layer_idx] += dec_analysis[layer_idx]["attn_count"]
+                    dec_mass[layer_idx] += dec_analysis["attn_mass"]
+                    dec_count[layer_idx] += dec_analysis["attn_count"]
+                    dec_freq[layer_idx]  += dec_analysis["gate_freq"]
         
         enc_mass_mean = enc_mass / enc_count.clamp(min=1)
-        enc_above_threshold = enc_mass_mean >= mass_threshold
+        enc_above_threshold = (enc_mass_mean >= mass_threshold) & (enc_freq >= min_freq)
         enc_has_exceeding_bin = enc_above_threshold.any(dim=-1)
         enc_first_bin = enc_above_threshold.float().argmax(dim=-1)
         enc_gate_threshold = enc_first_bin.float() / num_bins
         enc_gate_threshold = enc_gate_threshold.masked_fill(~enc_has_exceeding_bin, 1.0)
 
         cross_mass_mean = cross_mass / cross_count.clamp(min=1)
-        cross_above_threshold = cross_mass_mean >= mass_threshold
+        cross_above_threshold = (cross_mass_mean >= mass_threshold) & (cross_freq >= min_freq)
         cross_has_exceeding_bin = cross_above_threshold.any(dim=-1)
         cross_first_bin = cross_above_threshold.float().argmax(dim=-1)
         cross_gate_threshold = cross_first_bin.float() / num_bins
         cross_gate_threshold = cross_gate_threshold.masked_fill(~cross_has_exceeding_bin, 1.0)
 
         dec_mass_mean = dec_mass / dec_count.clamp(min=1)
-        dec_above_threshold = dec_mass_mean >= mass_threshold
+        dec_above_threshold = (dec_mass_mean >= mass_threshold) & (dec_freq >= min_freq)
         dec_has_exceeding_bin = dec_above_threshold.any(dim=-1)
         dec_first_bin = dec_above_threshold.float().argmax(dim=-1)
         dec_gate_threshold = dec_first_bin.float() / num_bins
