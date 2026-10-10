@@ -293,12 +293,28 @@ class Seq2SeqLM(nn.Module):
         seq_ids = torch.where(first_eos, gen_cfg.eos_token_id, seq_ids)
 
         if analysis_cfg is not None:
-            max_cached_tokens = (seq_len + min(state.step + 1, gen_cfg.max_new_tokens)) * self.cfg.num_layers
-            total_kept_tokens = sum(
-                cache[layer_idx].cross_attn_cache.k.shape[2] + cache[layer_idx].attn_cache.write_idx
-                for layer_idx in range(self.cfg.num_layers)
-            )
-            stats["overall"]["token_kept_ratio"] = total_kept_tokens / max_cached_tokens
+            num_heads = self.cfg.model_dim // self.cfg.head_dim
+            decoder_len = state.step + 1
+
+            max_self_slots  = num_heads * decoder_len
+            max_cross_slots = num_heads * seq_len
+            max_cached_slots = (max_self_slots + max_cross_slots) * self.cfg.num_layers
+
+            total_kept_slots = 0
+            for layer_idx in range(self.cfg.num_layers):
+                attn_cache = cache[layer_idx].attn_cache
+                log_gate_decode = attn_cache.log_gate
+                if log_gate_decode is not None:
+                    write_idx = attn_cache.write_idx
+                    total_kept_slots += (
+                        ~torch.isinf(log_gate_decode[:, :, :write_idx])
+                    ).sum().item()
+
+                log_gate_encode = cache[layer_idx].cross_attn_cache.log_gate
+                if log_gate_encode is not None:
+                    total_kept_slots += (~torch.isinf(log_gate_encode)).sum().item()
+
+            stats["overall"]["kept_ratio"] = total_kept_slots / max_cached_slots
 
             return seq_ids, stats
 
