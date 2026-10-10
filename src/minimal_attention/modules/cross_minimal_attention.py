@@ -214,7 +214,7 @@ class CrossMinMHA(nn.Module):
         """
         batch_size = hidden_states.shape[0]
         device = hidden_states.device
-        attn_gate_threshold = gen_cfg.attn_gate_thresholds[self.layer_idx] if gen_cfg.attn_gate_thresholds is not None else None
+        attn_gate_threshold = gen_cfg.cross_attn_gate_thresholds[self.layer_idx] if gen_cfg.cross_attn_gate_thresholds is not None else None
         
         q = self.q_proj(hidden_states)
         q = q.view(batch_size, self.num_heads, self.head_dim).unsqueeze(2)
