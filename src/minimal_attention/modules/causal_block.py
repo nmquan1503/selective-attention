@@ -5,7 +5,7 @@ import math
 from typing import Tuple
 
 from .ssm import SSM
-from .minimal_attention import MinMHA
+from .attention import MHA
 from .feed_forward import SwiGLU
 from .rms_norm import RMSNorm
 from ..inference import CausalBlockCache, InferenceState, GenerationConfig, AnalysisConfig
@@ -16,7 +16,6 @@ class CausalBlock(nn.Module):
         layer_idx: int,
         model_dim: int = 512,
         head_dim: int = 64,
-        attn_log_gate_penalty: float = 2.0,
         ssm_state_dim: int = 128,
         ssm_conv_kernel_size: int = 4,
         ssm_num_groups: int = 1,
@@ -41,11 +40,10 @@ class CausalBlock(nn.Module):
             dropout_rate=dropout_rate,
             device=device
         )
-        self.mha = MinMHA(
+        self.mha = MHA(
             layer_idx=layer_idx, 
             dim=model_dim, 
             head_dim=head_dim,
-            log_gate_penalty=attn_log_gate_penalty, 
             is_causal=True
         )
         self.ffn = SwiGLU(model_dim, model_dim * 4)
@@ -55,21 +53,23 @@ class CausalBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         lengths: torch.Tensor | None = None,
-        attn_gate_threshold: torch.Tensor | None = None,
         cache: CausalBlockCache | None = None,
-        analysis_cfg: AnalysisConfig | None = None,
-        stats: dict | None = None
     ):
         """
         Args:
             hidden_states: (batch_size, seq_len, model_dim)
             lengths: (batch_size,)
-            attn_gate_theshold: (num_heads,)
         
         Returns: 
             hidden_states: (batch_size, seq_len, model_dim)
             last_ssm_hiddens: (batch_size, inner_dim, state_dim)
         """
+        masks = None
+        if lengths is not None:
+            seq_len = hidden_states.shape[1]
+            positions = torch.arange(seq_len, device=hidden_states.device)
+            masks = positions.unsqueeze(0) < lengths.to(hidden_states.device).unsqueeze(1)
+        
         res = hidden_states
         hidden_states = self.norm1(hidden_states)
         hidden_states, last_ssm_hiddens = self.ssm(
@@ -83,11 +83,8 @@ class CausalBlock(nn.Module):
         hidden_states = self.norm2(hidden_states)
         hidden_states = self.mha(
             hidden_states=hidden_states, 
-            lengths=lengths,
-            attn_gate_threshold=attn_gate_threshold,
+            masks=masks,
             cache=cache.attn_cache if cache is not None else None,
-            analysis_cfg=analysis_cfg,
-            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 
@@ -104,8 +101,6 @@ class CausalBlock(nn.Module):
         cache: CausalBlockCache, 
         state: InferenceState, 
         gen_cfg: GenerationConfig,
-        analysis_cfg: AnalysisConfig | None = None,
-        stats: dict | None = None
     ):
         """
         Args: (batch_size, model_dim)
@@ -127,8 +122,6 @@ class CausalBlock(nn.Module):
             cache=cache.attn_cache, 
             state=state, 
             gen_cfg=gen_cfg,
-            analysis_cfg=analysis_cfg,
-            stats=stats
         )
         hidden_states = res + self.dropout(hidden_states)
 
