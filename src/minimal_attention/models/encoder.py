@@ -11,7 +11,6 @@ class EncoderConfig:
     vocab_size: int = 32000
     model_dim: int = 512
     head_dim: int = 64
-    attn_log_gate_penalty: float = 2.0
     ssm_state_dim: int = 64
     ssm_conv_kernel_size: int = 4
     ssm_num_groups: int = 1
@@ -35,7 +34,6 @@ class Encoder(nn.Module):
                 layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
-                attn_log_gate_penalty=cfg.attn_log_gate_penalty,
                 ssm_state_dim=cfg.ssm_state_dim,
                 ssm_conv_kernel_size=cfg.ssm_conv_kernel_size,
                 ssm_num_groups=cfg.ssm_num_groups,
@@ -50,8 +48,6 @@ class Encoder(nn.Module):
         self,
         input_ids: torch.Tensor,
         lengths: torch.Tensor,
-        attn_gate_thresholds: torch.Tensor | None = None,
-        analysis_cfg: AnalysisConfig | None = None,
     ):
         """
         Args:
@@ -62,42 +58,12 @@ class Encoder(nn.Module):
             hidden_states: (batch_size, seq_len, model_dim)
         """
 
-        stats = None
-        if analysis_cfg is not None:
-            layers_stats = [{} for _ in range(self.cfg.num_layers)]
-            overall_stats = {}
-            stats = {
-                "layers": layers_stats,
-                "overall": overall_stats
-            }
-
         hidden_states = self.embedding(input_ids)
         for layer_idx, layer in enumerate(self.layers):
             hidden_states, _ = layer(
                 hidden_states=hidden_states,
                 lengths=lengths,
-                attn_gate_threshold=attn_gate_thresholds[layer_idx] if attn_gate_thresholds is not None else None,
-                analysis_cfg=analysis_cfg,
-                stats=stats["layers"][layer_idx] if stats is not None else None
             )
-
-        if analysis_cfg is not None:
-            total_head_tokens = 0
-            kept_head_tokens = 0
-
-            for layer_stats in stats["layers"]:
-                key = "non_causal_attn_gate_analysis"
-                if key in layer_stats:
-                    total_head_tokens += layer_stats[key].get("total_head_tokens", 0)
-                    kept_head_tokens += layer_stats[key].get("kept_head_tokens", 0)
-
-            stats["overall"]["kept_ratio"] = (
-                kept_head_tokens / total_head_tokens
-                if total_head_tokens > 0
-                else 1.0
-            )
-
-            return hidden_states, stats
         
         return hidden_states
 
@@ -128,57 +94,6 @@ class Encoder(nn.Module):
             self.forward(
                 input_ids=input_ids,
                 lengths=lengths,
-                attn_gate_thresholds=torch.full(
-                    (self.cfg.num_layers, self.cfg.model_dim // self.cfg.head_dim),
-                    0.5, device=device
-                ),
             )
 
         torch.cuda.synchronize(device)
-
-    def compute_attn_gate_threshold(
-        self,
-        inputs: List[torch.Tensor],
-        lengths: List[torch.Tensor],
-        mass_threshold: float,
-        analysis_cfg: AnalysisConfig
-    ):
-        """
-        Args:
-            inputs: List[(batch_size, seq_len)]
-            lengths: List[(batch_size,)]
-
-        Returns:
-            attn_gate_threshold: (num_layers, num_heads)
-        """
-        num_bins = analysis_cfg.gate_attn_num_bins
-        num_heads = self.cfg.model_dim // self.cfg.head_dim
-        num_layers = self.cfg.num_layers
-
-        mass = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
-        count = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
-        freq = torch.zeros(num_layers, num_heads, num_bins, device=self.cfg.device)
-
-        with torch.inference_mode():
-            for ip, l in zip(inputs, lengths):
-                ip = ip.to(self.cfg.device)
-                l = l.to(self.cfg.device)
-                _, stats_dict = self.forward(ip, l, None, analysis_cfg)
-                for layer_idx in range(num_layers):
-                    gate_analysis = stats_dict["layers"][layer_idx]["non_causal_attn_gate_analysis"]
-                    mass[layer_idx] += gate_analysis["attn_mass"]
-                    count[layer_idx] += gate_analysis["attn_count"]
-                    freq[layer_idx] += gate_analysis["gate_freq"]
-
-        mass_mean = mass / count.clamp(min=1)
-        min_freq = 30
-        above_threshold = (mass_mean >= mass_threshold) & (freq >= min_freq)
-        has_exceeding_bin = above_threshold.any(dim=-1)
-        first_bin = above_threshold.float().argmax(dim=-1)
-        calibrated_threshold = first_bin.float() / num_bins
-        calibrated_threshold = calibrated_threshold.masked_fill(
-            ~has_exceeding_bin,
-            1.1,
-        )
-        
-        return calibrated_threshold
