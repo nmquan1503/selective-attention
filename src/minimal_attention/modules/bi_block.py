@@ -65,7 +65,7 @@ class BiBlock(nn.Module):
         masks = None
         if lengths is not None:
             seq_len = hidden_states.shape[1]
-            positions = torch.arange(seq_len, device=hidden_states.device)
+            positions = torch.arange(seq_len, device=hidden_states.device).unsqueeze(1)
             masks = positions.unsqueeze(0) < lengths.to(hidden_states.device)
 
         res = hidden_states
