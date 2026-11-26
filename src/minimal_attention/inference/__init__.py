@@ -6,6 +6,8 @@ from .cross_block_cache import CrossBlockCache
 from .infer_state import InferenceState
 from .generation_config import GenerationConfig
 from .analysis_config import AnalysisConfig
+from .attn_cache import AttnCache
+from .cross_attn_cache import CrossAttnCache
 
 __all__ = [
     "SSMCache", 
